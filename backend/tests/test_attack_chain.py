@@ -98,6 +98,16 @@ def make_command_execution(**overrides):
     return make_finding(**values)
 
 
+def make_system_information_discovery(**overrides):
+    values = {
+        "finding_id": "f-system-information",
+        "vulnerability_type": "system_information_discovery",
+        "evidence_refs": ["evidence://system-information"],
+    }
+    values.update(overrides)
+    return make_finding(**values)
+
+
 class TestConfirmedChain(unittest.TestCase):
 
     def test_produces_confirmed_chain(self):
@@ -273,6 +283,66 @@ class TestUnixShellProgression(unittest.TestCase):
             [step.finding_id for step in first.steps],
             [step.finding_id for step in second.steps],
         )
+
+
+class TestSystemInformationDiscoveryProgression(unittest.TestCase):
+
+    def test_t1190_t1059_004_t1082_forms_three_technique_chain(self):
+        chain = build_attack_paths([
+            make_scan(),
+            make_sqli(),
+            make_command_execution(),
+            make_system_information_discovery(),
+        ])[0]
+
+        self.assertEqual(
+            chain.mitre_techniques,
+            ["T1190", "T1059.004", "T1082"],
+        )
+        self.assertEqual(
+            [step.finding_id for step in chain.steps],
+            [
+                "f-scan",
+                "f-sqli",
+                "f-command-execution",
+                "f-system-information",
+            ],
+        )
+        self.assertEqual(chain.status, "confirmed")
+        self.assertIn("system_information", chain.capabilities_gained)
+
+    def test_rejected_system_information_cannot_advance_chain(self):
+        chain = build_attack_paths([
+            make_scan(),
+            make_sqli(),
+            make_command_execution(),
+            make_system_information_discovery(
+                status=ValidationStatus.REJECTED,
+                confidence=0.0,
+            ),
+        ])[0]
+
+        self.assertEqual(chain.mitre_techniques, ["T1190", "T1059.004"])
+        self.assertNotIn("system_information", chain.capabilities_gained)
+
+    def test_t1082_prerequisite_is_scan_and_asset_isolated(self):
+        cases = (
+            {"scan_id": "scan-other"},
+            {"asset_id": "asset-other"},
+        )
+        for scope_override in cases:
+            with self.subTest(scope_override=scope_override):
+                chains = build_attack_paths([
+                    make_scan(),
+                    make_sqli(),
+                    make_command_execution(),
+                    make_system_information_discovery(**scope_override),
+                ])
+
+                self.assertFalse(any(
+                    "T1082" in chain.mitre_techniques
+                    for chain in chains
+                ))
 
 
 class TestPotentialChains(unittest.TestCase):

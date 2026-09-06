@@ -135,19 +135,19 @@ class HarnessPersistenceTests(unittest.TestCase):
             )
             self.assertEqual(
                 session.scalar(select(func.count()).select_from(FindingORM)),
-                6,
+                7,
             )
             self.assertEqual(
                 session.scalar(select(func.count()).select_from(ValidationORM)),
-                5,
+                6,
             )
             self.assertEqual(
                 session.scalar(select(func.count()).select_from(EvidenceORM)),
-                5,
+                6,
             )
             self.assertEqual(
                 session.scalar(select(func.count()).select_from(MitreMappingORM)),
-                2,
+                3,
             )
             repository = PersistenceRepository(session)
             findings = repository.list_findings_for_scan(scan_id)
@@ -187,6 +187,22 @@ class HarnessPersistenceTests(unittest.TestCase):
                 .evidence_json["canary_content_marker_observed"]
             )
             self.assertEqual(ssrf_candidate.mitre_mappings, [])
+            system_information_candidate = next(
+                finding for finding in findings
+                if finding.vulnerability_type == "system_information_discovery"
+            )
+            self.assertEqual(
+                system_information_candidate.status,
+                ValidationStatus.DETECTED,
+            )
+            self.assertEqual(
+                system_information_candidate.validations[0].status,
+                ValidationStatus.CONFIRMED,
+            )
+            self.assertEqual(
+                system_information_candidate.mitre_mappings[0].technique_id,
+                "T1082",
+            )
             self.assertEqual(len(chains), 4)
             self.assertTrue(all(
                 [step.step_number for step in chain.steps]
@@ -202,15 +218,15 @@ class HarnessPersistenceTests(unittest.TestCase):
             )
             self.assertEqual(
                 [step.technique_id for step in progression.steps],
-                [None, "T1190", "T1059.004"],
+                [None, "T1190", "T1059.004", "T1082"],
             )
             self.assertEqual(
                 progression.steps[-2].capability,
-                "application_compromise",
+                "command_execution",
             )
             self.assertEqual(
                 progression.steps[-1].capability,
-                "command_execution",
+                "system_information",
             )
         finally:
             session.close()
@@ -230,6 +246,10 @@ class HarnessPersistenceTests(unittest.TestCase):
         )
         self.assertTrue(any(
             any(step["technique_id"] == "T1059.004" for step in chain["steps"])
+            for chain in fetched_chains.json()
+        ))
+        self.assertTrue(any(
+            any(step["technique_id"] == "T1082" for step in chain["steps"])
             for chain in fetched_chains.json()
         ))
 

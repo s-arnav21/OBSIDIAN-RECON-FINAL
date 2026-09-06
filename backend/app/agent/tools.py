@@ -113,6 +113,18 @@ DEFAULT_AGENT_TOOLS = (
         provides=("command_execution",),
         automatic_allowed=False,
     ),
+    AgentToolDefinition(
+        tool_id="validate-system-information-discovery-simulation",
+        validator_id="controlled-http-system-information-discovery",
+        vulnerability_types=("system_information_discovery",),
+        description=(
+            "Run the fixed loopback-only System Information Discovery "
+            "simulation."
+        ),
+        requires_any=("command_execution",),
+        provides=("system_information",),
+        automatic_allowed=False,
+    ),
 )
 
 

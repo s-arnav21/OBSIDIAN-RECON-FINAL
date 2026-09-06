@@ -897,12 +897,12 @@ class GenericLocalWebHarnessApiTests(unittest.TestCase):
     def validation(self, name):
         return self.body["validations"][name]
 
-    def test_scenario_is_accepted_and_returns_five_findings(self):
+    def test_scenario_is_accepted_and_returns_six_findings(self):
         self.assertEqual(self.response.status_code, 200)
         self.assertEqual(self.body["scenario"], GENERIC_LOCAL_WEB_SCENARIO)
         self.assertEqual(self.body["mode"], "live_loopback_fixture")
-        self.assertEqual(len(self.body["findings"]), 5)
-        self.assertEqual(len(self.body["validations"]), 5)
+        self.assertEqual(len(self.body["findings"]), 6)
+        self.assertEqual(len(self.body["validations"]), 6)
 
     def test_sqli_is_confirmed_and_mapped_to_t1190(self):
         result = self.validation("sql_injection")
@@ -976,6 +976,26 @@ class GenericLocalWebHarnessApiTests(unittest.TestCase):
             "T1059.004",
         )
 
+    def test_system_information_is_confirmed_and_mapped(self):
+        result = self.validation("system_information_discovery")
+        self.assertEqual(
+            result["validation_result"]["status"],
+            ValidationStatus.CONFIRMED,
+        )
+        self.assertEqual(
+            result["validation_result"]["validator"],
+            "controlled_http_system_information_discovery",
+        )
+        self.assertEqual(result["finding"]["mitre_technique_id"], "T1082")
+        self.assertEqual(
+            result["finding"]["requires_any"],
+            ["command_execution"],
+        )
+        self.assertEqual(
+            result["finding"]["provides"],
+            ["system_information"],
+        )
+
     def test_attack_chains_and_steps_are_serialized(self):
         chain_result = self.body["chain_result"]
         self.assertEqual(chain_result["status"], "confirmed")
@@ -988,9 +1008,9 @@ class GenericLocalWebHarnessApiTests(unittest.TestCase):
         )
         self.assertEqual(
             progression["mitre_techniques"],
-            ["T1190", "T1059.004"],
+            ["T1190", "T1059.004", "T1082"],
         )
-        self.assertEqual(len(progression["steps"]), 3)
+        self.assertEqual(len(progression["steps"]), 4)
 
     def test_generic_api_response_schema_is_valid(self):
         self.assertEqual(
@@ -1017,7 +1037,7 @@ class GenericLocalWebHarnessApiTests(unittest.TestCase):
         self.assertFalse(self.body["development_dns_bypass_used"])
         self.assertEqual(self.body["overall_status"], "completed")
         self.assertEqual(self.body["presentation_mode"], "controlled_lab")
-        self.assertEqual(len(self.body["finding_presentations"]), 5)
+        self.assertEqual(len(self.body["finding_presentations"]), 6)
         self.assertTrue(self.body["attack_flow"]["multi_stage_paths"])
         self.assertEqual(
             set(self.body["agent_run"]),

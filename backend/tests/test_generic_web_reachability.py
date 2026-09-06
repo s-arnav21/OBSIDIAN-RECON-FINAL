@@ -90,7 +90,14 @@ class ReachabilityPolicyTests(unittest.TestCase):
             "local-fixture-health-check",
         )
         self.assertEqual(result.reachability.evidence, {"health_status": 200})
-        self.assertEqual(mocked_dispatch.call_count, 5)
+        self.assertEqual(mocked_dispatch.call_count, 6)
+        self.assertIn(
+            "controlled-http-system-information-discovery",
+            {
+                artifact.candidate.validator_id
+                for artifact in result.validations
+            },
+        )
 
     def test_local_pipeline_health_failure_still_fails_closed(self):
         client = _LocalReachabilityClient(

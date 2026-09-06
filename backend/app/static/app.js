@@ -61,9 +61,28 @@ function displayStatus(value) {
   return String(value || "unknown").replaceAll("_", " ");
 }
 
+function agentRunPresentation(run) {
+  const runStatus = String(run?.status || "").toLowerCase();
+  const stopReason = String(run?.stop_reason || "").toLowerCase();
+  const policyStopped = runStatus === "blocked" && stopReason.startsWith("denied_");
+  const displayedReason = displayStatus(run?.stop_reason || "no action proposed");
+  return {
+    badgeText: run
+      ? policyStopped ? "POLICY STOPPED" : displayStatus(run.status || "unknown")
+      : "Not run",
+    statusTone: statusClass(run?.status || "queued"),
+    emptyMessage: policyStopped
+      ? `Agent stopped safely by policy: ${displayedReason}.`
+      : `Agent stopped without an executable action: ${displayedReason}.`,
+  };
+}
+
 function displayFindingType(value) {
   if (value === "command_execution") {
     return "Controlled Command-Execution Simulation";
+  }
+  if (value === "system_information_discovery") {
+    return "Controlled System Information Discovery Simulation";
   }
   return displayStatus(value || "Unknown finding");
 }
@@ -457,14 +476,15 @@ function renderFindings(data) {
 
 function renderAgentActivity(data) {
   const run = data.agent_run || data.agent_activity || null;
+  const presentation = agentRunPresentation(run);
   const steps = Array.isArray(run?.steps) ? run.steps : [];
   const list = $("#agent-steps");
   const empty = $("#agent-empty");
   const status = $("#agent-status");
   list.replaceChildren();
   empty.hidden = Boolean(run);
-  status.className = `status-pill ${statusClass(run?.status || "queued")}`;
-  status.textContent = run ? displayStatus(run.status || "unknown") : "Not run";
+  status.className = `status-pill ${presentation.statusTone}`;
+  status.textContent = presentation.badgeText;
   if (!run) return;
 
   steps.forEach((step) => {
@@ -522,7 +542,7 @@ function renderAgentActivity(data) {
   if (!steps.length) {
     const note = document.createElement("li");
     note.className = "empty-state";
-    note.textContent = `Agent stopped without an executable action: ${displayStatus(run.stop_reason || "no action proposed")}.`;
+    note.textContent = presentation.emptyMessage;
     list.append(note);
   }
 }

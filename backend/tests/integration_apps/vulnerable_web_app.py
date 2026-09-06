@@ -32,6 +32,12 @@ from app.validation.ssrf import (
     CONTROLLED_CONTROL_PATH,
     controlled_content_marker,
 )
+from app.validation.system_information import (
+    BASELINE_DISCOVERY_TOKEN,
+    CONTROL_DISCOVERY_TOKEN,
+    DISCOVERY_PROBE_TOKEN,
+    SYSTEM_INFORMATION_MARKER,
+)
 
 
 app = FastAPI(title="Obsidian Recon Local Integration Fixture")
@@ -52,6 +58,12 @@ _SQLI_FALSE_BODY = (
 SYNTHETIC_EXPOSURE_BODY = (
     "APP_MODE=synthetic-integration-test\n"
     "SERVICE_TOKEN=FAKE-NOT-A-REAL-SECRET\n"
+)
+SYNTHETIC_SYSTEM_INFORMATION_BODY = (
+    f"{SYSTEM_INFORMATION_MARKER}\n"
+    "hostname=obsidian-demo-host\n"
+    "operating_system=Obsidian Demo OS\n"
+    "architecture=synthetic-x86_64\n"
 )
 _SSRF_IDENTIFIER_RE = re.compile(
     r"^or-ssrf-(?:baseline|canary|negative)-[0-9a-f]{20}$"
@@ -299,6 +311,20 @@ async def admin_diagnostics(request: Request) -> PlainTextResponse:
     if diagnostic_token == CONTROL_PROBE_TOKEN:
         return PlainTextResponse("synthetic diagnostic control rejected")
     return PlainTextResponse("unsupported synthetic diagnostic token")
+
+
+@app.post("/admin/system-information", response_class=PlainTextResponse)
+async def admin_system_information(request: Request) -> PlainTextResponse:
+    """Return fixed demo metadata without inspecting the host system."""
+    body = (await request.body()).decode("utf-8", errors="replace")
+    discovery_token = parse_qs(body).get("discovery_token", [""])[0]
+    if discovery_token == DISCOVERY_PROBE_TOKEN:
+        return PlainTextResponse(SYNTHETIC_SYSTEM_INFORMATION_BODY)
+    if discovery_token == BASELINE_DISCOVERY_TOKEN:
+        return PlainTextResponse("synthetic system-information baseline")
+    if discovery_token == CONTROL_DISCOVERY_TOKEN:
+        return PlainTextResponse("synthetic system-information control rejected")
+    return PlainTextResponse("unsupported synthetic discovery token")
 
 
 class LocalVulnerableAppServer:

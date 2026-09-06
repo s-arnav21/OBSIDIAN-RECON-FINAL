@@ -18,6 +18,9 @@ from app.validation.command_execution import (
 from app.validation.exposure import validate_generic_exposed_resource
 from app.validation.sql_injection import validate_generic_http_sqli
 from app.validation.ssrf import validate_generic_http_ssrf
+from app.validation.system_information import (
+    validate_controlled_system_information_discovery,
+)
 from app.validation.xss import validate_generic_reflected_xss
 
 
@@ -43,6 +46,9 @@ register("generic-http-ssrf")(validate_generic_http_ssrf)
 register("generic-http-exposed-resource")(validate_generic_exposed_resource)
 register("generic-http-command-execution")(
     validate_generic_http_command_execution
+)
+register("controlled-http-system-information-discovery")(
+    validate_controlled_system_information_discovery
 )
 
 

@@ -72,6 +72,26 @@ class ReadinessApiTests(unittest.TestCase):
 
 class PrototypeStaticUiTests(unittest.TestCase):
     @staticmethod
+    def _agent_presentation_with_javascript(payload):
+        if shutil.which("node") is None:
+            raise unittest.SkipTest("Node.js is required for frontend adapter tests")
+        javascript = (STATIC_DIR / "app.js").read_text()
+        adapter_source = javascript.split("function displayFindingType", 1)[0]
+        program = (
+            adapter_source
+            + "\nprocess.stdout.write(JSON.stringify(agentRunPresentation("
+            + json.dumps(payload)
+            + ")));"
+        )
+        result = subprocess.run(
+            ["node", "-e", program],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return json.loads(result.stdout)
+
+    @staticmethod
     def _extract_pairs_with_javascript(payload):
         if shutil.which("node") is None:
             raise unittest.SkipTest("Node.js is required for frontend adapter tests")
@@ -138,6 +158,7 @@ class PrototypeStaticUiTests(unittest.TestCase):
             "run.final_state?.findings",
             "function renderTargetContext(inputSelector, outputSelector)",
             'return "Controlled Command-Execution Simulation"',
+            'return "Controlled System Information Discovery Simulation"',
             "VIEW PROOF OF CONCEPT",
             "Business-risk rationale",
             "Controlled request shapes",
@@ -168,6 +189,39 @@ class PrototypeStaticUiTests(unittest.TestCase):
         self.assertIn("policy_decision", javascript)
         self.assertIn("observation", javascript)
         self.assertNotIn("/api/agent", javascript)
+
+    def test_policy_denial_is_presented_as_a_safe_policy_stop(self):
+        for reason in (
+            "denied_not_automatic",
+            "denied_duplicate",
+            "denied_prerequisite",
+        ):
+            with self.subTest(reason=reason):
+                presentation = self._agent_presentation_with_javascript({
+                    "status": "blocked",
+                    "stop_reason": reason,
+                })
+
+                self.assertEqual(presentation["badgeText"], "POLICY STOPPED")
+                self.assertEqual(presentation["statusTone"], "warning")
+                self.assertEqual(
+                    presentation["emptyMessage"],
+                    "Agent stopped safely by policy: "
+                    f"{reason.replace('_', ' ')}.",
+                )
+
+    def test_non_policy_blocked_run_keeps_existing_presentation(self):
+        presentation = self._agent_presentation_with_javascript({
+            "status": "blocked",
+            "stop_reason": "planner_error",
+        })
+
+        self.assertEqual(presentation["badgeText"], "blocked")
+        self.assertEqual(presentation["statusTone"], "warning")
+        self.assertEqual(
+            presentation["emptyMessage"],
+            "Agent stopped without an executable action: planner error.",
+        )
 
     def test_nested_attack_flow_presentations_render_as_unique_findings(self):
         sql_presentation = {

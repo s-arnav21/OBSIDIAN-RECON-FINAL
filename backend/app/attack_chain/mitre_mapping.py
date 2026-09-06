@@ -103,6 +103,18 @@ TECHNIQUE_DEFINITIONS: Dict[str, TechniqueDefinition] = {
         cwe_hints=["CWE-78"],
         owasp_hints=["A03:2021"],
     ),
+    "T1082": TechniqueDefinition(
+        technique_id="T1082",
+        technique_name="System Information Discovery",
+        tactic="Discovery",
+        description=(
+            "Discovery of operating-system or hardware information from a "
+            "compromised execution context."
+        ),
+        requires_any=["command_execution"],
+        provides=["system_information"],
+        vulnerability_types=["system_information_discovery"],
+    ),
     "T1078": TechniqueDefinition(
         technique_id="T1078",
         technique_name="Valid Accounts",

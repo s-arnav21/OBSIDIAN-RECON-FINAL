@@ -84,6 +84,23 @@ def command_finding() -> Finding:
     )
 
 
+def system_information_finding() -> Finding:
+    return Finding(
+        finding_id="finding-system-information",
+        scan_id=SCAN_ID,
+        asset_id=ASSET_ID,
+        target=ORIGIN,
+        host="127.0.0.1",
+        source="controlled_fixture",
+        vulnerability_type="system_information_discovery",
+        validator_id="controlled-http-system-information-discovery",
+        endpoint="/admin/system-information",
+        http_method="POST",
+        parameter_name="discovery_token",
+        parameter_location="form",
+    )
+
+
 def agent_state(
     *,
     findings=None,
@@ -246,7 +263,7 @@ class AgentToolRegistryTests(unittest.TestCase):
     def test_registry_discovers_only_fixed_validator_backed_tools(self):
         registry = AgentToolRegistry()
         tools = registry.list_tools()
-        self.assertEqual(len(tools), 5)
+        self.assertEqual(len(tools), 6)
         self.assertEqual(
             {tool.validator_id for tool in tools},
             {
@@ -255,6 +272,7 @@ class AgentToolRegistryTests(unittest.TestCase):
                 "generic-http-ssrf",
                 "generic-http-exposed-resource",
                 "generic-http-command-execution",
+                "controlled-http-system-information-discovery",
             },
         )
         self.assertNotIn("dvwa-sqli-low", str(registry.planner_catalog()))
@@ -268,6 +286,14 @@ class AgentToolRegistryTests(unittest.TestCase):
         tool = AgentToolRegistry().require(
             "validate-command-execution-simulation"
         )
+        self.assertFalse(tool.automatic_allowed)
+
+    def test_system_information_simulation_is_not_automatic(self):
+        tool = AgentToolRegistry().require(
+            "validate-system-information-discovery-simulation"
+        )
+        self.assertEqual(tool.requires_any, ("command_execution",))
+        self.assertEqual(tool.provides, ("system_information",))
         self.assertFalse(tool.automatic_allowed)
 
 
@@ -396,6 +422,30 @@ class AgentPolicyTests(unittest.TestCase):
             PolicyDecisionCode.DENIED_NOT_AUTOMATIC,
         )
 
+    def test_agent_cannot_bypass_system_information_policy(self):
+        self.state = AgentState.from_findings(
+            scan_id=SCAN_ID,
+            target=ORIGIN,
+            asset_id=ASSET_ID,
+            authorized=True,
+            findings=[system_information_finding()],
+            maximum_steps=2,
+        )
+        self.state = replace(
+            self.state,
+            capabilities=("unauthenticated", "command_execution"),
+        )
+        requested = action(
+            tool_id="validate-system-information-discovery-simulation",
+            finding_id="finding-system-information",
+            expected_capabilities=("command_execution",),
+        )
+
+        self.assert_decision(
+            requested,
+            PolicyDecisionCode.DENIED_NOT_AUTOMATIC,
+        )
+
 
 class AgentExecutorTests(unittest.TestCase):
     def setUp(self):
@@ -468,7 +518,7 @@ class AgentOrchestratorTests(unittest.TestCase):
             "confirmed",
         )
         self.assertNotIn("must-never-reach-planner", str(planner.states))
-        self.assertEqual(len(planner.catalogs[0]), 5)
+        self.assertEqual(len(planner.catalogs[0]), 6)
 
     def test_policy_denial_blocks_orchestration(self):
         planner = QueuePlanner([action(tool_id="unknown-agent-tool")])

@@ -16,6 +16,9 @@ GENERIC_REFLECTED_XSS_VALIDATOR_ID = "generic-http-reflected-xss"
 GENERIC_SSRF_VALIDATOR_ID = "generic-http-ssrf"
 GENERIC_EXPOSED_RESOURCE_VALIDATOR_ID = "generic-http-exposed-resource"
 GENERIC_COMMAND_EXECUTION_VALIDATOR_ID = "generic-http-command-execution"
+CONTROLLED_SYSTEM_INFORMATION_VALIDATOR_ID = (
+    "controlled-http-system-information-discovery"
+)
 RECON_MANUAL_REVIEW_VALIDATOR_ID = "recon-manual-review"
 REFLECTED_XSS_REQUEST_SHAPES = frozenset(
     (method, location)
@@ -36,6 +39,9 @@ SQLI_TYPES = frozenset({"sql_injection", "sqli"})
 COMMAND_EXECUTION_TYPES = frozenset({
     "command_execution",
     "unix_shell_command_execution",
+})
+SYSTEM_INFORMATION_DISCOVERY_TYPES = frozenset({
+    "system_information_discovery",
 })
 REFLECTED_XSS_TYPES = frozenset({
     "cross_site_scripting",
@@ -349,6 +355,42 @@ def normalize_command_execution_record(record: HttpScannerRecord) -> Finding:
         record,
         vulnerability_type="command_execution",
         validator_id=GENERIC_COMMAND_EXECUTION_VALIDATOR_ID,
+        http_method=http_method,
+        parameter_name=_required_text(
+            record.parameter_name,
+            "parameter_name",
+        ),
+        parameter_location=parameter_location,
+    )
+
+
+def normalize_system_information_discovery_record(
+    record: HttpScannerRecord,
+) -> Finding:
+    """Normalize the controlled fixture's synthetic discovery observation."""
+    if not isinstance(record, HttpScannerRecord):
+        raise TypeError("record must be an HttpScannerRecord")
+
+    normalized_type = _normalized_type_name(record.vulnerability_type)
+    if normalized_type not in SYSTEM_INFORMATION_DISCOVERY_TYPES:
+        raise ScannerNormalizationError(
+            "vulnerability_type must identify system information discovery"
+        )
+
+    http_method = _required_text(record.http_method, "http_method").upper()
+    parameter_location = _required_text(
+        record.parameter_location,
+        "parameter_location",
+    ).lower()
+    if (http_method, parameter_location) != ("POST", "form"):
+        raise ScannerNormalizationError(
+            "controlled system-information validation requires POST/form"
+        )
+
+    return _build_finding(
+        record,
+        vulnerability_type="system_information_discovery",
+        validator_id=CONTROLLED_SYSTEM_INFORMATION_VALIDATOR_ID,
         http_method=http_method,
         parameter_name=_required_text(
             record.parameter_name,

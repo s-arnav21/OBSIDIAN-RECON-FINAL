@@ -107,7 +107,7 @@ class ControlledDemoAgentApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(body["overall_status"], "completed")
-        self.assertEqual(len(body["findings"]), 5)
+        self.assertEqual(len(body["findings"]), 6)
         run = body["agent_run"]
         self.assertEqual(run["status"], "completed")
         self.assertEqual(run["stop_reason"], "planner_completed")
@@ -153,7 +153,7 @@ class ControlledDemoAgentApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(body["overall_status"], "completed")
-        self.assertEqual(len(body["validations"]), 5)
+        self.assertEqual(len(body["validations"]), 6)
         self.assertEqual(body["agent_run"]["status"], "failed")
         self.assertEqual(body["agent_run"]["stop_reason"], "planner_error")
         self.assertEqual(body["agent_run"]["steps"], [])

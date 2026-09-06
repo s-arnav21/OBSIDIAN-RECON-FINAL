@@ -21,6 +21,12 @@ from app.validation.command_execution import (
     EXECUTION_MARKER,
     EXECUTION_PROBE_TOKEN,
 )
+from app.validation.system_information import (
+    BASELINE_DISCOVERY_TOKEN,
+    CONTROL_DISCOVERY_TOKEN,
+    DISCOVERY_PROBE_TOKEN,
+    SYSTEM_INFORMATION_MARKER,
+)
 from tests.integration_apps.local_multi_validator_pipeline import (
     ScopedLoopbackHttpClient,
     TargetScopeError,
@@ -174,6 +180,32 @@ class TestLiveMultiValidatorIntegration(unittest.TestCase):
         self.assertNotIn(EXECUTION_MARKER, control.text)
         self.assertNotIn(EXECUTION_MARKER, arbitrary.text)
 
+    def test_system_information_endpoint_returns_only_fixed_synthetic_data(self):
+        with ScopedLoopbackHttpClient(self.origin) as client:
+            baseline = client.post(
+                f"{self.origin}/admin/system-information",
+                data={"discovery_token": BASELINE_DISCOVERY_TOKEN},
+            )
+            probe = client.post(
+                f"{self.origin}/admin/system-information",
+                data={"discovery_token": DISCOVERY_PROBE_TOKEN},
+            )
+            control = client.post(
+                f"{self.origin}/admin/system-information",
+                data={"discovery_token": CONTROL_DISCOVERY_TOKEN},
+            )
+            arbitrary = client.post(
+                f"{self.origin}/admin/system-information",
+                data={"discovery_token": "caller-controlled-value"},
+            )
+
+        self.assertNotIn(SYSTEM_INFORMATION_MARKER, baseline.text)
+        self.assertIn(SYSTEM_INFORMATION_MARKER, probe.text)
+        self.assertIn("hostname=obsidian-demo-host", probe.text)
+        self.assertIn("operating_system=Obsidian Demo OS", probe.text)
+        self.assertNotIn(SYSTEM_INFORMATION_MARKER, control.text)
+        self.assertNotIn(SYSTEM_INFORMATION_MARKER, arbitrary.text)
+
     def test_all_records_normalize_with_independent_routing(self):
         expected = {
             "sql_injection": (
@@ -200,6 +232,11 @@ class TestLiveMultiValidatorIntegration(unittest.TestCase):
                 "information_disclosure",
                 "generic-http-exposed-resource",
                 "local-fixture-exposure-check",
+            ),
+            "system_information_discovery": (
+                "system_information_discovery",
+                "controlled-http-system-information-discovery",
+                "local-fixture-system-information-discovery-check",
             ),
         }
         for name, expected_values in expected.items():
@@ -361,6 +398,30 @@ class TestLiveMultiValidatorIntegration(unittest.TestCase):
             ["command_execution"],
         )
 
+    def test_live_system_information_confirms_and_maps_to_t1082(self):
+        validation = self.validation("system_information_discovery")
+        evidence = validation["validation_result"]["evidence"]
+
+        self.assertEqual(
+            validation["validation_result"]["validator"],
+            "controlled_http_system_information_discovery",
+        )
+        self.assertEqual(
+            validation["validation_result"]["status"],
+            ValidationStatus.CONFIRMED,
+        )
+        self.assertTrue(evidence["discovery_marker_present"])
+        self.assertFalse(evidence["real_system_information_accessed"])
+        self.assertEqual(validation["finding"]["mitre_technique_id"], "T1082")
+        self.assertEqual(
+            validation["finding"]["requires_any"],
+            ["command_execution"],
+        )
+        self.assertEqual(
+            validation["finding"]["provides"],
+            ["system_information"],
+        )
+
     def test_attack_chain_contains_t1190_without_fabricated_mappings(self):
         chains = self.pipeline_result["chains"]
         self.assertEqual(len(chains), 4)
@@ -372,7 +433,7 @@ class TestLiveMultiValidatorIntegration(unittest.TestCase):
         self.assertEqual(t1190_chains[0]["status"], "confirmed")
         self.assertEqual(
             t1190_chains[0]["mitre_techniques"],
-            ["T1190", "T1059.004"],
+            ["T1190", "T1059.004", "T1082"],
         )
         self.assertIn(
             self.validation("sql_injection")["finding"]["finding_id"],
@@ -397,6 +458,9 @@ class TestLiveMultiValidatorIntegration(unittest.TestCase):
                     reachability_id,
                     self.validation("sql_injection")["finding"]["finding_id"],
                     self.validation("command_execution")["finding"][
+                        "finding_id"
+                    ],
+                    self.validation("system_information_discovery")["finding"][
                         "finding_id"
                     ],
                 ),
@@ -433,6 +497,7 @@ class TestLiveMultiValidatorIntegration(unittest.TestCase):
                 "/search",
                 "/debug-config",
                 "/admin/diagnostics",
+                "/admin/system-information",
                 "/ssrf/fetch",
                 "/__obsidian_ssrf/canary",
                 "/__obsidian_ssrf/control",

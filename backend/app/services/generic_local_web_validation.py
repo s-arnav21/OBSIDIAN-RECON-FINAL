@@ -26,6 +26,7 @@ from app.scanning.normalizer import (
     normalize_http_sqli_record,
     normalize_reflected_xss_record,
     normalize_ssrf_record,
+    normalize_system_information_discovery_record,
 )
 from app.scanning.scope import AuthorizedTarget, ReconScopeError
 from app.validation.dispatcher import apply_validation_result, dispatch
@@ -49,6 +50,7 @@ class _ReachabilityPolicy:
     template_id: str
     evidence_status_key: str
     required_status: Optional[int] = None
+    controlled_fixture: bool = False
 
 
 _LOCAL_FIXTURE_REACHABILITY = _ReachabilityPolicy(
@@ -57,6 +59,7 @@ _LOCAL_FIXTURE_REACHABILITY = _ReachabilityPolicy(
     template_id="local-fixture-health-check",
     evidence_status_key="health_status",
     required_status=200,
+    controlled_fixture=True,
 )
 
 _EXTERNAL_REACHABILITY = _ReachabilityPolicy(
@@ -245,6 +248,7 @@ def _scanner_records(
     scan_id: str,
     asset_id: str,
     observed_at: str,
+    include_system_information_discovery: bool,
 ) -> Dict[str, object]:
     """Create only the trusted candidates exposed by the local fixture."""
     common = {
@@ -254,7 +258,7 @@ def _scanner_records(
         "scanner_name": "local_integration_fixture",
         "observed_at": observed_at,
     }
-    return {
+    records: Dict[str, object] = {
         "sql_injection": HttpScannerRecord(
             record_id=f"finding-{uuid4()}",
             endpoint="/items",
@@ -313,6 +317,25 @@ def _scanner_records(
             **common,
         ),
     }
+    if include_system_information_discovery:
+        records["system_information_discovery"] = HttpScannerRecord(
+            record_id=f"finding-{uuid4()}",
+            endpoint="/admin/system-information",
+            http_method="POST",
+            parameter_name="discovery_token",
+            parameter_location="form",
+            scanner_template_id=(
+                "local-fixture-system-information-discovery-check"
+            ),
+            vulnerability_type="system_information_discovery",
+            severity="low",
+            evidence={
+                "fixture_endpoint": True,
+                "synthetic_system_information_only": True,
+            },
+            **common,
+        )
+    return records
 
 
 def execute_local_multi_validator_pipeline(
@@ -359,6 +382,9 @@ def execute_local_multi_validator_pipeline(
         scan_id=resolved_scan_id,
         asset_id=asset_id,
         observed_at=observed_at,
+        include_system_information_discovery=(
+            reachability_policy.controlled_fixture
+        ),
     )
     findings = {
         "sql_injection": normalize_http_sqli_record(records["sql_injection"]),
@@ -371,6 +397,12 @@ def execute_local_multi_validator_pipeline(
             records["exposed_resource"]
         ),
     }
+    if "system_information_discovery" in records:
+        findings["system_information_discovery"] = (
+            normalize_system_information_discovery_record(
+                records["system_information_discovery"]
+            )
+        )
 
     validations = []
     enriched_findings = []
