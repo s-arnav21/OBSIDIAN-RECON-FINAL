@@ -23,3 +23,47 @@ AI-Powered Automated Penetration Testing Platform
 ## Setup Steps (same for everyone, once prerequisites are done)
 
 1. Clone the repo:
+
+## Controlled validation demo target
+
+The repository includes a deliberately vulnerable synthetic web application
+used by the automated integration suite. It contains no production database,
+real credentials, shell execution, unrestricted proxying, or arbitrary SSRF.
+Docker Compose publishes it only on the host loopback interface.
+
+Start the target from the repository root:
+
+```bash
+docker compose up -d demo-target
+```
+
+Wait for the service to become healthy, then verify it:
+
+```bash
+docker compose ps demo-target
+curl --fail http://127.0.0.1:8090/health
+```
+
+Run Obsidian's `generic_local_web_validation` scenario against this exact
+authorized target origin:
+
+```text
+http://127.0.0.1:8090
+```
+
+The controlled fixture exercises deterministic SQL injection, reflected XSS,
+same-origin SSRF canary retrieval, synthetic information exposure, and fixed
+command-execution simulation contracts. The command route recognizes only
+project-defined synthetic tokens and never invokes an operating-system shell.
+
+Stop the target without stopping the other Compose services:
+
+```bash
+docker compose stop demo-target
+```
+
+To remove its stopped container as well:
+
+```bash
+docker compose rm -f demo-target
+```
