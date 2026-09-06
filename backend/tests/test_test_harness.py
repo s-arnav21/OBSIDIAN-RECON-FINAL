@@ -846,7 +846,8 @@ class TestHarnessApiTests(unittest.TestCase):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertIn("OBSIDIAN RECON", response.text)
-        self.assertIn("Temporary local test harness", response.text)
+        self.assertIn("Controlled Lab Demonstration", response.text)
+        self.assertIn("Authorized security assessment", response.text)
 
     def test_ui_exposes_generic_local_scenario(self):
         response = self.client.get("/static/app.js")
@@ -1010,6 +1011,7 @@ class GenericLocalWebHarnessApiTests(unittest.TestCase):
                 "attack_flow",
                 "presentation_mode",
                 "development_dns_bypass_used",
+                "agent_run",
             },
         )
         self.assertFalse(self.body["development_dns_bypass_used"])
@@ -1017,6 +1019,25 @@ class GenericLocalWebHarnessApiTests(unittest.TestCase):
         self.assertEqual(self.body["presentation_mode"], "controlled_lab")
         self.assertEqual(len(self.body["finding_presentations"]), 5)
         self.assertTrue(self.body["attack_flow"]["multi_stage_paths"])
+        self.assertEqual(
+            set(self.body["agent_run"]),
+            {
+                "initial_state",
+                "steps",
+                "final_state",
+                "status",
+                "stop_reason",
+                "steps_used",
+            },
+        )
+        self.assertEqual(
+            self.body["agent_run"]["initial_state"]["scan_id"],
+            self.body["scan_id"],
+        )
+        self.assertEqual(
+            self.body["agent_run"]["initial_state"]["asset_id"],
+            self.body["asset_id"],
+        )
         for result in self.body["validations"].values():
             self.assertTrue({
                 "vulnerability_type",

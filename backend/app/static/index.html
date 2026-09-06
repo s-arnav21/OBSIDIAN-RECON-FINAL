@@ -4,22 +4,30 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="Obsidian Recon authorized security validation prototype">
-    <title>Obsidian Recon — Prototype</title>
+    <title>Obsidian Recon — Authorized Security Assessment</title>
     <link rel="stylesheet" href="/static/styles.css">
   </head>
   <body>
     <div class="app-shell">
       <header class="masthead">
         <div>
-          <p class="eyebrow">Authorized security validation prototype</p>
+          <p class="eyebrow">Authorized security assessment</p>
           <h1 aria-label="OBSIDIAN RECON">OBSIDIAN <span>RECON</span></h1>
           <p class="subtitle">
-            Reconnaissance, vulnerability verification, MITRE ATT&amp;CK mapping,
-            proof-of-concept evidence, and attack-path analysis.
+            Discover the exposed surface, deterministically validate candidate
+            weaknesses, map evidence to MITRE ATT&amp;CK, and explain attack paths.
           </p>
         </div>
-        <div class="environment-badge"><span></span> Local prototype</div>
+        <div class="environment-badge"><span></span> Demonstration ready</div>
       </header>
+
+      <ol class="workflow-strip" aria-label="Obsidian Recon assessment workflow">
+        <li><strong>01</strong><span>Scope target</span></li>
+        <li><strong>02</strong><span>Discover surface</span></li>
+        <li><strong>03</strong><span>Validate safely</span></li>
+        <li><strong>04</strong><span>Map ATT&amp;CK</span></li>
+        <li><strong>05</strong><span>Explain paths</span></li>
+      </ol>
 
       <section class="health-strip" aria-labelledby="health-heading">
         <div class="health-heading">
@@ -32,15 +40,15 @@
       </section>
 
       <nav class="tabs" aria-label="Prototype modes">
-        <button class="tab is-active" type="button" data-tab="scan-panel" aria-selected="true">Real reconnaissance scan</button>
-        <button class="tab" type="button" data-tab="demo-panel" aria-selected="false">Controlled Lab Demonstration</button>
+        <button class="tab is-active" type="button" data-tab="scan-panel" aria-selected="true">Authorized assessment</button>
+        <button class="tab" type="button" data-tab="demo-panel" aria-selected="false">Controlled demo</button>
       </nav>
 
       <main>
         <section id="scan-panel" class="tab-panel" aria-labelledby="scan-heading">
           <div class="panel scan-panel">
             <div class="panel-heading">
-              <div><p class="eyebrow">Authorized reconnaissance</p><h2 id="scan-heading">Start authorized scan</h2></div>
+              <div><p class="eyebrow">Assessment launch pad</p><h2 id="scan-heading">Start authorized assessment</h2></div>
               <span class="mode-badge">Real tools</span>
             </div>
             <p class="panel-copy">
@@ -51,11 +59,12 @@
             <form id="scan-form">
               <label for="scan-target">Target URL</label>
               <input id="scan-target" name="target_url" type="url" value="http://127.0.0.1:8090" autocomplete="url" required>
+              <div id="scan-target-context" class="target-context" aria-live="polite"></div>
               <label class="authorization" for="scan-authorized">
                 <input id="scan-authorized" name="authorized" type="checkbox" required>
                 <span>I confirm that I own this target or have explicit authorization to test it.</span>
               </label>
-              <button id="scan-button" class="primary-button" type="submit">START SCAN</button>
+              <button id="scan-button" class="primary-button" type="submit">START ASSESSMENT</button>
             </form>
             <p id="scan-message" class="status-message" role="status" aria-live="polite"></p>
           </div>
@@ -97,8 +106,8 @@
         <section id="demo-panel" class="tab-panel" aria-labelledby="demo-heading" hidden>
           <div class="panel scan-panel">
             <div class="panel-heading">
-              <div><p class="eyebrow">Temporary local test harness</p><h2 id="demo-heading">Controlled Lab Demonstration</h2></div>
-              <span class="mode-badge fixture">Test harness</span>
+              <div><p class="eyebrow">Safe capstone workflow</p><h2 id="demo-heading">Controlled Lab Demonstration</h2></div>
+              <span class="mode-badge fixture">Synthetic target</span>
             </div>
             <p class="panel-copy">
               Preserves the existing controlled validation scenarios, including the
@@ -108,6 +117,7 @@
             <form id="demo-form">
               <label for="demo-target">Controlled target URL</label>
               <input id="demo-target" name="target_url" type="url" value="http://127.0.0.1:8090" autocomplete="url" required>
+              <div id="demo-target-context" class="target-context" aria-live="polite"></div>
               <label for="scenario">Scenario</label>
               <select id="scenario" name="scenario" required></select>
               <label class="authorization" for="demo-authorized">
@@ -131,8 +141,8 @@
         </section>
 
         <section id="results" class="results" aria-labelledby="results-heading" hidden>
-          <div class="panel-heading">
-            <div><p class="eyebrow">Evidence-backed output</p><h2 id="results-heading">Scan results</h2></div>
+          <div class="panel-heading results-heading">
+            <div><p class="eyebrow">Assessment overview</p><h2 id="results-heading">Evidence-backed result</h2><p id="result-target" class="result-target"></p></div>
             <span id="result-mode" class="status-pill"></span>
           </div>
           <div id="summary-cards" class="summary-grid"></div>
@@ -143,8 +153,9 @@
               <table>
                 <thead><tr>
                   <th>Finding</th><th>Severity</th><th>Endpoint</th>
-                  <th>Validation</th><th>Confidence</th><th>MITRE ATT&amp;CK</th>
-                  <th>Risk</th><th>PoC</th>
+                  <th>Validation</th><th>Confidence</th><th>Validator</th>
+                  <th>MITRE ATT&amp;CK</th><th>Capabilities gained</th>
+                  <th>Risk</th><th>Evidence</th>
                 </tr></thead>
                 <tbody id="findings-body"></tbody>
               </table>
@@ -152,14 +163,38 @@
             <p id="findings-empty" class="empty-state" hidden>No candidate findings were returned.</p>
           </section>
 
+          <section class="result-section" aria-labelledby="agent-heading">
+            <div class="section-title agent-title">
+              <div><p class="eyebrow">Bounded orchestration</p><h3 id="agent-heading">Agent Activity</h3></div>
+              <span id="agent-status" class="status-pill queued">Not run</span>
+            </div>
+            <p class="section-copy">
+              Sanitized action trace only: proposal, policy decision, registered tool,
+              and observation. Hidden reasoning and chain-of-thought are never displayed.
+            </p>
+            <div class="agent-boundary" aria-label="Bounded agent execution boundary">
+              <span>Server-trusted AgentRunService</span><b>→</b>
+              <span>Policy Gate</span><b>→</b>
+              <span>Registered deterministic validator</span><b>→</b>
+              <span>Sanitized observation</span>
+            </div>
+            <ol id="agent-steps" class="agent-steps"></ol>
+            <p id="agent-empty" class="empty-state">
+              No bounded agent run is attached to this result. The browser cannot choose
+              tools or actions; agent execution requires server-trusted scan state. No
+              live LLM endpoint is enabled by this presentation layer.
+            </p>
+          </section>
+
           <section class="result-section" aria-labelledby="chains-heading">
-            <div class="section-title attack-flow-title"><div><p class="eyebrow">Evidence-supported progression</p><h3 id="chains-heading">ATTACK FLOW</h3></div><span id="chain-count" class="count-badge">0</span></div>
+            <div class="section-title attack-flow-title"><div><p class="eyebrow">Evidence-supported progression</p><h3 id="chains-heading">ATTACK PATHS</h3></div><span id="chain-count" class="count-badge">0</span></div>
+            <p class="section-copy">Only backend-generated paths are shown. Environmental prerequisites are summarized separately from validated techniques.</p>
             <div id="chain-list" class="chain-list"></div>
             <p id="chains-empty" class="empty-state" hidden>No evidence-supported attack path was generated.</p>
           </section>
 
           <details class="raw-output">
-            <summary>View raw response</summary>
+            <summary>Advanced · view raw API response</summary>
             <pre id="raw-json"></pre>
           </details>
         </section>
@@ -174,7 +209,7 @@
           <p id="lookup-message" class="status-message" role="status" aria-live="polite"></p>
         </section>
       </main>
-      <footer>Obsidian Recon · Local authorized-use prototype</footer>
+      <footer>Obsidian Recon · Authorized-use deterministic security assessment</footer>
     </div>
     <script src="/static/app.js" defer></script>
   </body>

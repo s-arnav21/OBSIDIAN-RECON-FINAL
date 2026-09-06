@@ -13,11 +13,16 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
+from app.agent.run_service import AgentRunService
 from app.attack_chain.engine import build_attack_paths, load_all_findings
 from app.attack_chain.mitre_mapping import enrich_finding_model
 from app.integrations.labs.dvwa import DVWALabAdapter
 from app.models.finding import Finding, ValidationStatus
 from app.models.validation import ValidationResult
+from app.services.controlled_demo_agent import (
+    AgentRunServiceFactory,
+    run_controlled_demo_agent,
+)
 from app.services.generic_local_web_validation import (
     GENERIC_LOCAL_WEB_SCENARIO,
     GenericLocalWebRun,
@@ -254,6 +259,9 @@ class TestHarnessPipeline:
         ),
         target_verification_service: Optional[TargetVerificationService] = None,
         dev_dns_bypass_enabled: Optional[bool] = None,
+        agent_run_service_factory: AgentRunServiceFactory = (
+            AgentRunService.from_environment
+        ),
     ) -> None:
         if not callable(fixture_result_provider):
             raise TypeError("fixture_result_provider must be callable")
@@ -280,6 +288,9 @@ class TestHarnessPipeline:
         self._target_verification_service = (
             target_verification_service or TargetVerificationService()
         )
+        if not callable(agent_run_service_factory):
+            raise TypeError("agent_run_service_factory must be callable")
+        self._agent_run_service_factory = agent_run_service_factory
         if (
             dev_dns_bypass_enabled is not None
             and type(dev_dns_bypass_enabled) is not bool
@@ -499,6 +510,17 @@ class TestHarnessPipeline:
                     )],
                 )
                 result = generic_run.to_dict()
+                agent_run = run_controlled_demo_agent(
+                    generic_run,
+                    authorized_target=verified_external_target,
+                    address_resolver=(
+                        self._target_verification_service.resolve_addresses
+                        if verified_external_target is not None
+                        else None
+                    ),
+                    run_service_factory=self._agent_run_service_factory,
+                )
+                result["agent_run"] = agent_run.to_dict()
                 result["development_dns_bypass_used"] = (
                     development_dns_bypass_used
                 )

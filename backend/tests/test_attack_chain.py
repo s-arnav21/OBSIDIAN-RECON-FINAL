@@ -462,6 +462,106 @@ class TestPathQuality(unittest.TestCase):
         ]))
 
 
+class TestCapabilityProgression(unittest.TestCase):
+
+    def test_branch_stops_at_explicit_terminal_capability(self):
+        entry = make_finding(
+            "f-entry",
+            provides=["test_foothold"],
+        )
+        goal = make_finding(
+            "f-goal",
+            requires_any=["test_foothold"],
+            provides=["test_goal_reached"],
+        )
+        downstream = make_finding(
+            "f-downstream",
+            requires_any=["test_goal_reached"],
+            provides=["test_post_goal_action"],
+        )
+
+        chains = build_attack_paths(
+            [entry, goal, downstream],
+            terminal_capabilities={"test_goal_reached"},
+        )
+
+        self.assertEqual(len(chains), 1)
+        self.assertEqual(
+            [step.finding_id for step in chains[0].steps],
+            ["f-entry", "f-goal"],
+        )
+
+    def test_downstream_step_is_not_appended_after_terminal_capability(self):
+        entry = make_finding(
+            "f-entry",
+            provides=["test_foothold"],
+        )
+        goal = make_finding(
+            "f-goal",
+            requires_any=["test_foothold"],
+            provides=["test_goal_reached"],
+        )
+        downstream = make_finding(
+            "f-downstream",
+            requires_any=["test_goal_reached"],
+            provides=["test_post_goal_action"],
+        )
+
+        chains = build_attack_paths(
+            [entry, goal, downstream],
+            terminal_capabilities={"test_goal_reached"},
+        )
+        chained_ids = {
+            step.finding_id
+            for chain in chains
+            for step in chain.steps
+        }
+
+        self.assertNotIn("f-downstream", chained_ids)
+
+    def test_chain_continues_when_extension_adds_a_new_capability(self):
+        entry = make_finding(
+            "f-entry",
+            provides=["test_foothold"],
+        )
+        execution = make_finding(
+            "f-execution",
+            requires_any=["test_foothold"],
+            provides=["test_execution"],
+        )
+        control = make_finding(
+            "f-control",
+            requires_any=["test_execution"],
+            provides=["test_system_control"],
+        )
+
+        chain = build_attack_paths([entry, execution, control])[0]
+
+        self.assertEqual(
+            [step.finding_id for step in chain.steps],
+            ["f-entry", "f-execution", "f-control"],
+        )
+
+    def test_extension_with_no_new_capability_is_suppressed(self):
+        control = make_finding(
+            "f-control",
+            provides=["test_account_control"],
+        )
+        redundant_action = make_finding(
+            "f-redundant-action",
+            requires_any=["test_account_control"],
+            provides=["test_account_control"],
+        )
+
+        chains = build_attack_paths([control, redundant_action])
+
+        self.assertEqual(len(chains), 1)
+        self.assertEqual(
+            [step.finding_id for step in chains[0].steps],
+            ["f-control"],
+        )
+
+
 class TestStableChainIdentity(unittest.TestCase):
 
     def test_identical_input_has_identical_chain_id(self):

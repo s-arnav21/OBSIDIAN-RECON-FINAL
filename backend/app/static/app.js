@@ -9,6 +9,10 @@ const progressStages = [
   "Attack-path analysis", "Persistence",
 ];
 
+const environmentalFindingTypes = new Set([
+  "service_scan", "port_scan", "network_scan", "nmap_scan", "nuclei_scan",
+]);
+
 const $ = (selector) => document.querySelector(selector);
 
 async function requestJson(url, options = {}) {
@@ -49,7 +53,7 @@ function statusClass(value) {
   const normalized = String(value || "unknown").toLowerCase().replaceAll("_", "-");
   if (["confirmed", "completed", "ready"].includes(normalized)) return "success";
   if (["failed", "verification-failed", "rejected", "unavailable", "expired"].includes(normalized)) return "danger";
-  if (["manual-review", "degraded", "not-configured"].includes(normalized)) return "warning";
+  if (["manual-review", "degraded", "not-configured", "blocked"].includes(normalized)) return "warning";
   return normalized;
 }
 
@@ -57,32 +61,112 @@ function displayStatus(value) {
   return String(value || "unknown").replaceAll("_", " ");
 }
 
+function displayFindingType(value) {
+  if (value === "command_execution") {
+    return "Controlled Command-Execution Simulation";
+  }
+  return displayStatus(value || "Unknown finding");
+}
+
 function findingValidationPairs(data) {
+  const pairs = new Map();
+  const addPair = (finding = {}, validation = {}, presentation = null) => {
+    const location = presentation?.location || {};
+    const presentedValidation = presentation?.validation || {};
+    const mitre = presentation?.mitre || {};
+    const derivedFinding = {
+      finding_id: presentation?.finding_id,
+      target: location.target,
+      endpoint: location.endpoint,
+      http_method: location.http_method,
+      parameter_name: location.parameter_name,
+      parameter_location: location.parameter_location,
+      vulnerability_type: presentation?.vulnerability_type,
+      validation_status: presentedValidation.status,
+      validation_confidence: presentedValidation.confidence,
+      validator_id: presentedValidation.validator,
+      mitre_technique_id: mitre.technique_id,
+      mitre_technique_name: mitre.technique_name,
+      mitre_tactic: mitre.tactic,
+      provides: presentation?.provides,
+    };
+    const cleanDerivedFinding = Object.fromEntries(
+      Object.entries(derivedFinding).filter(([, value]) => value !== undefined),
+    );
+    const mergedFinding = { ...cleanDerivedFinding, ...finding };
+    const mergedValidation = { ...presentedValidation, ...validation };
+    const key = mergedFinding.finding_id
+      || mergedFinding.id
+      || [mergedFinding.vulnerability_type, mergedFinding.target, mergedFinding.endpoint]
+        .filter(Boolean).join("|");
+    if (!key) return;
+    const existing = pairs.get(key);
+    pairs.set(key, existing ? {
+      finding: { ...mergedFinding, ...existing.finding },
+      validation: { ...mergedValidation, ...existing.validation },
+      presentation: existing.presentation || presentation,
+    } : {
+      finding: mergedFinding,
+      validation: mergedValidation,
+      presentation,
+    });
+  };
+
+  const presentationById = new Map();
+  const rememberPresentation = (presentation) => {
+    if (!presentation?.finding_id) return;
+    if (!presentationById.has(presentation.finding_id)) {
+      presentationById.set(presentation.finding_id, presentation);
+    }
+  };
+  (Array.isArray(data.finding_presentations) ? data.finding_presentations : [])
+    .forEach(rememberPresentation);
+  const attackFlow = data.attack_flow || {};
+  [attackFlow.multi_stage_paths, attackFlow.standalone_findings]
+    .filter(Array.isArray)
+    .flat()
+    .forEach((chain) => (chain.steps || []).forEach((step) => {
+      rememberPresentation(step.finding_presentation);
+    }));
+
   if (data.finding) {
     const technique = data.technique || {};
-    return [{
-      finding: {
-        ...data.finding,
-        mitre_technique_id:
-          data.finding.mitre_technique_id || technique.technique_id,
-        mitre_technique_name:
-          data.finding.mitre_technique_name || technique.technique_name,
-      },
-      validation: data.validation_result || {},
-    }];
+    const finding = {
+      ...data.finding,
+      mitre_technique_id:
+        data.finding.mitre_technique_id || technique.technique_id,
+      mitre_technique_name:
+        data.finding.mitre_technique_name || technique.technique_name,
+    };
+    addPair(
+      finding,
+      data.validation_result || {},
+      presentationById.get(finding.finding_id || finding.id),
+    );
   }
   if (data.validations && !Array.isArray(data.validations)) {
-    return Object.values(data.validations).map((item) => ({
-      finding: item.finding || {},
-      validation: item.validation_result || {},
-    }));
+    Object.values(data.validations).forEach((item) => {
+      const finding = item?.finding || {};
+      addPair(
+        finding,
+        item?.validation_result || {},
+        presentationById.get(finding.finding_id || finding.id),
+      );
+    });
   }
   const findings = Array.isArray(data.findings) ? data.findings : [];
   const validations = Array.isArray(data.validations) ? data.validations : [];
-  return findings.map((finding, index) => ({
+  findings.forEach((finding, index) => addPair(
     finding,
-    validation: validations[index] || finding.validations?.at(-1) || {},
-  }));
+    validations[index] || finding.validations?.at(-1) || {},
+    presentationById.get(finding.finding_id || finding.id),
+  ));
+  presentationById.forEach((presentation) => addPair(
+    {},
+    presentation.validation || {},
+    presentation,
+  ));
+  return [...pairs.values()];
 }
 
 function resultChains(data) {
@@ -107,9 +191,7 @@ function techniqueFor(finding) {
 
 function computeSummary(data) {
   const pairs = findingValidationPairs(data);
-  const presentations = Array.isArray(data.finding_presentations)
-    ? data.finding_presentations
-    : [];
+  const presentations = pairs.map(({ presentation }) => presentation).filter(Boolean);
   const statuses = pairs.map(({ finding, validation }) =>
     validation.status || finding.validation_status || finding.status || "detected");
   const techniques = new Set(
@@ -155,15 +237,13 @@ function renderSummary(data) {
   const container = $("#summary-cards");
   container.replaceChildren();
   [
-    ["Scan status", displayStatus(summary.status), statusClass(summary.status)],
+    ["Assessment status", displayStatus(summary.status), statusClass(summary.status)],
     ["Assets", summary.assets], ["Services", summary.services],
     ["Candidate findings", summary.candidates],
     ["Confirmed", summary.confirmed, "success"],
-    ["Rejected", summary.rejected, "danger"],
-    ["Manual review", summary.manualReview, "warning"],
+    ["Rejected / review", `${summary.rejected} / ${summary.manualReview}`, summary.manualReview ? "warning" : ""],
     ["MITRE techniques", summary.techniques], ["Attack chains", summary.chains],
-    ["High risk", summary.highRisk, "warning"],
-    ["Critical risk", summary.criticalRisk, "danger"],
+    ["High / critical risk", `${summary.highRisk} / ${summary.criticalRisk}`, summary.criticalRisk ? "danger" : summary.highRisk ? "warning" : ""],
   ].forEach(([label, value, tone]) => addSummaryCard(container, label, value, tone));
 }
 
@@ -304,22 +384,18 @@ function renderProofDetails(presentation) {
 
 function renderFindings(data) {
   const pairs = findingValidationPairs(data);
-  const presentations = new Map(
-    (data.finding_presentations || []).map((item) => [item.finding_id, item]),
-  );
   const body = $("#findings-body");
   body.replaceChildren();
   $("#finding-count").textContent = String(pairs.length);
   $("#findings-empty").hidden = pairs.length !== 0;
   $(".table-wrap").hidden = pairs.length === 0;
-  pairs.forEach(({ finding, validation }) => {
+  pairs.forEach(({ finding, validation, presentation }) => {
     const status = validation.status || finding.validation_status || finding.status || "detected";
     const technique = techniqueFor(finding);
-    const presentation = presentations.get(finding.finding_id || finding.id);
     const row = document.createElement("tr");
     const findingCell = document.createElement("td");
     const name = document.createElement("strong");
-    name.textContent = displayStatus(finding.vulnerability_type || "Unknown finding");
+    name.textContent = displayFindingType(finding.vulnerability_type);
     const id = document.createElement("small");
     id.textContent = finding.finding_id || finding.id || "";
     findingCell.append(name, id);
@@ -341,11 +417,24 @@ function renderFindings(data) {
       ? `${Math.round(confidence * 100)}%`
       : "—";
     row.append(confidenceCell);
+    const validatorCell = document.createElement("td");
+    const validatorName = validation.validator
+      || finding.validator_id
+      || finding.template_id
+      || "—";
+    validatorCell.textContent = displayStatus(validatorName);
+    row.append(validatorCell);
     const mitreCell = document.createElement("td");
     mitreCell.textContent = technique.id
       ? `${technique.id}${technique.name ? `\n${technique.name}` : ""}${(presentation?.mitre?.tactic || technique.tactic) ? `\n${presentation?.mitre?.tactic || technique.tactic}` : ""}`
       : "Unmapped";
     row.append(mitreCell);
+    const capabilitiesCell = document.createElement("td");
+    const capabilities = presentation?.provides || finding.provides || [];
+    capabilitiesCell.textContent = Array.isArray(capabilities) && capabilities.length
+      ? capabilities.map(displayStatus).join("\n")
+      : "None recorded";
+    row.append(capabilitiesCell);
     const riskCell = document.createElement("td");
     riskCell.append(createRiskPill(presentation?.risk?.rating));
     row.append(riskCell);
@@ -354,10 +443,88 @@ function renderFindings(data) {
     proofLabel.className = "poc-label";
     proofLabel.textContent = presentation?.poc?.label || "Unavailable";
     proofCell.append(proofLabel);
+    if (presentation?.validation?.reason) {
+      const evidenceSummary = document.createElement("small");
+      evidenceSummary.className = "evidence-summary";
+      evidenceSummary.textContent = displayStatus(presentation.validation.reason);
+      proofCell.append(evidenceSummary);
+    }
     proofCell.append(renderProofDetails(presentation));
     row.append(proofCell);
     body.append(row);
   });
+}
+
+function renderAgentActivity(data) {
+  const run = data.agent_run || data.agent_activity || null;
+  const steps = Array.isArray(run?.steps) ? run.steps : [];
+  const list = $("#agent-steps");
+  const empty = $("#agent-empty");
+  const status = $("#agent-status");
+  list.replaceChildren();
+  empty.hidden = Boolean(run);
+  status.className = `status-pill ${statusClass(run?.status || "queued")}`;
+  status.textContent = run ? displayStatus(run.status || "unknown") : "Not run";
+  if (!run) return;
+
+  steps.forEach((step) => {
+    const action = step.proposed_action || {};
+    const policy = step.policy_decision || {};
+    const observation = step.observation || {};
+    const finalFinding = (run.final_state?.findings || []).find(
+      (finding) => finding.finding_id === action.finding_id,
+    ) || {};
+    const item = document.createElement("li");
+    item.className = "agent-step";
+    const header = document.createElement("div");
+    header.className = "agent-step-header";
+    const title = document.createElement("strong");
+    title.textContent = `Step ${step.step_number || "—"} / ${run.steps_used || steps.length} · ${displayStatus(action.tool_id || "registered tool")}`;
+    header.append(title, createStatusPill(observation.execution_status || policy.code));
+    item.append(header);
+
+    const trace = document.createElement("div");
+    trace.className = "agent-trace-grid";
+    appendLabeledText(trace, "Planner proposal", action.reason || "No proposal summary returned");
+    appendLabeledText(
+      trace,
+      "Policy Gate",
+      `${policy.allowed ? "APPROVED" : "DENIED"} · ${displayStatus(policy.code || observation.policy_decision)}`,
+    );
+    appendLabeledText(trace, "Selected registered tool", action.tool_id);
+    appendLabeledText(trace, "Finding", action.finding_id);
+    appendLabeledText(trace, "Observation", observation.summary);
+    appendLabeledText(
+      trace,
+      "Deterministic validator",
+      observation.validation_status
+        ? `${displayStatus(observation.validation_status)}${typeof finalFinding.validation_confidence === "number" ? ` — ${Math.round(finalFinding.validation_confidence * 100)}%` : ""}`
+        : null,
+    );
+    appendLabeledText(
+      trace,
+      "MITRE ATT&CK",
+      finalFinding.mitre_technique_id
+        ? `${finalFinding.mitre_technique_id} — ${finalFinding.mitre_technique_name || "Mapped technique"}`
+        : null,
+    );
+    appendLabeledText(
+      trace,
+      "Capabilities gained",
+      Array.isArray(observation.capabilities_gained) && observation.capabilities_gained.length
+        ? observation.capabilities_gained.map(displayStatus).join(", ")
+        : "None",
+    );
+    item.append(trace);
+    list.append(item);
+  });
+
+  if (!steps.length) {
+    const note = document.createElement("li");
+    note.className = "empty-state";
+    note.textContent = `Agent stopped without an executable action: ${displayStatus(run.stop_reason || "no action proposed")}.`;
+    list.append(note);
+  }
 }
 
 function renderChains(data) {
@@ -403,47 +570,57 @@ function renderChains(data) {
     badges.className = "chain-badges";
     badges.append(createRiskPill(chain.cumulative_risk), createStatusPill(chain.status));
     header.append(title, badges);
-    const flow = document.createElement("div");
-    flow.className = "chain-flow";
     const steps = Array.isArray(chain.steps) ? [...chain.steps] : [];
     steps.sort((left, right) => (left.step_number || 0) - (right.step_number || 0));
-    steps.forEach((step, index) => {
+    const contextSteps = steps.filter((step) =>
+      step.step_type === "environmental_fact"
+      || environmentalFindingTypes.has(step.vulnerability_type));
+    const actionSteps = steps.filter((step) => !contextSteps.includes(step));
+    if (contextSteps.length) {
+      const prerequisites = document.createElement("div");
+      prerequisites.className = "chain-prerequisites";
+      const label = document.createElement("strong");
+      label.textContent = "Observed prerequisite";
+      const values = document.createElement("span");
+      values.textContent = contextSteps.map((step) => {
+        const capabilities = Array.isArray(step.provides)
+          ? step.provides.map(displayStatus).join(", ")
+          : "reachable service";
+        return `${step.target || "Target"} · ${capabilities}`;
+      }).join(" · ");
+      prerequisites.append(label, values);
+      card.append(header, prerequisites);
+    } else {
+      card.append(header);
+    }
+    const flow = document.createElement("div");
+    flow.className = "chain-flow";
+    actionSteps.forEach((step, index) => {
       const node = document.createElement("div");
-      node.className = `chain-node ${step.mitre_technique_id ? "technique" : "context"}`;
+      node.className = `chain-node ${step.mitre_technique_id ? "technique" : "unmapped"}`;
       const kicker = document.createElement("span");
-      kicker.textContent = step.mitre_technique_id || "Environmental context";
+      kicker.textContent = step.mitre_technique_id || "Validated finding";
       const nodeTitle = document.createElement("strong");
       nodeTitle.textContent = step.mitre_technique_name
-        || displayStatus(step.vulnerability_type || step.capability || "Observed condition");
+        || displayFindingType(step.vulnerability_type || step.capability);
       const detail = step.finding_presentation || {};
       const location = detail.location || {};
       const metadata = document.createElement("small");
       metadata.textContent = [location.endpoint || step.target, displayStatus(step.validation_status)]
         .filter(Boolean).join(" · ");
       node.append(kicker, nodeTitle, metadata);
-      if (step.mitre_technique_id) {
-        appendLabeledText(node, "Tactic", detail.mitre?.tactic || step.mitre_tactic);
-        appendLabeledText(node, "Finding", displayStatus(detail.vulnerability_type || step.vulnerability_type));
-        appendLabeledText(node, "Endpoint", location.endpoint);
-        appendLabeledText(node, "HTTP method", location.http_method);
-        appendLabeledText(node, "Parameter", location.parameter_name);
-        appendLabeledText(node, "Parameter location", location.parameter_location);
-        appendLabeledText(node, "Validation", displayStatus(detail.validation?.status || step.validation_status));
-        appendLabeledText(node, "Confidence", typeof (detail.validation?.confidence ?? step.validation_confidence) === "number" ? `${Math.round((detail.validation?.confidence ?? step.validation_confidence) * 100)}%` : null);
-        appendLabeledText(node, "PoC available", detail.poc?.available ? "Yes" : "No");
-        appendList(node, "Technical outcome", (step.provides || []).map(displayStatus));
-        appendLabeledText(node, "Controlled-lab note", detail.poc?.safety_note);
-      } else {
-        appendLabeledText(node, "Type", "Environmental Context");
-        appendLabeledText(node, "Target", step.target);
-        appendLabeledText(node, "Observed", (step.provides || []).includes("discovered_services") ? "Reachable web service" : "Observed environmental condition");
-        appendList(node, "Capabilities", (step.provides || []).map(displayStatus));
-      }
+      appendLabeledText(node, "Tactic", detail.mitre?.tactic || step.mitre_tactic);
+      appendLabeledText(node, "Finding", displayFindingType(detail.vulnerability_type || step.vulnerability_type));
+      appendLabeledText(node, "Endpoint", location.endpoint);
+      appendLabeledText(node, "Validation", displayStatus(detail.validation?.status || step.validation_status));
+      appendLabeledText(node, "Confidence", typeof (detail.validation?.confidence ?? step.validation_confidence) === "number" ? `${Math.round((detail.validation?.confidence ?? step.validation_confidence) * 100)}%` : null);
+      appendList(node, "Capabilities gained", (step.provides || []).map(displayStatus));
+      appendLabeledText(node, "Safety boundary", detail.poc?.safety_note);
       flow.append(node);
-      if (index < steps.length - 1) {
+      if (index < actionSteps.length - 1) {
         const connector = document.createElement("div");
         connector.className = "chain-connector";
-        const nextStep = steps[index + 1];
+        const nextStep = actionSteps[index + 1];
         const dependency = (chain.dependencies || []).filter((item) =>
           item.provider_finding_id === step.finding_id
           && item.consumer_finding_id === nextStep.finding_id);
@@ -467,7 +644,7 @@ function renderChains(data) {
     appendList(impact, "Capabilities gained", (chain.cumulative_capabilities || []).map(displayStatus));
     appendList(impact, "Potential business impact", chain.potential_business_impact);
     appendLabeledText(impact, "Rating notice", chain.notice);
-    card.append(header, flow, impact);
+    card.append(flow, impact);
     list.append(card);
   });
   if (!presentedChains.length) {
@@ -487,13 +664,44 @@ function renderChains(data) {
 function renderResults(data, modeLabel) {
   renderSummary(data);
   renderFindings(data);
+  renderAgentActivity(data);
   renderChains(data);
   $("#result-mode").className =
     `status-pill ${statusClass(data.status || data.overall_status)}`;
   $("#result-mode").textContent = modeLabel;
+  const resultTarget = data.target_url || data.origin || data.target || "";
+  $("#result-target").textContent = [resultTarget, data.scan_id]
+    .filter(Boolean).join(" · ");
   $("#raw-json").textContent = JSON.stringify(data, null, 2);
   $("#results").hidden = false;
   $("#results").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function targetContext(value) {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    const loopback = host === "localhost"
+      || host === "127.0.0.1"
+      || host === "::1";
+    return loopback
+      ? { label: "Local controlled target", detail: "Loopback scope · DNS ownership proof not required", tone: "local" }
+      : { label: "External target", detail: "HTTPS and exact-origin DNS ownership proof required", tone: "external" };
+  } catch (_error) {
+    return { label: "Target pending", detail: "Enter a complete HTTP or HTTPS origin", tone: "unknown" };
+  }
+}
+
+function renderTargetContext(inputSelector, outputSelector) {
+  const context = targetContext($(inputSelector).value);
+  const output = $(outputSelector);
+  output.className = `target-context ${context.tone}`;
+  output.replaceChildren();
+  const label = document.createElement("strong");
+  label.textContent = context.label;
+  const detail = document.createElement("span");
+  detail.textContent = context.detail;
+  output.append(label, detail);
 }
 
 function setButtonLoading(button, loading, idleText, busyText) {
@@ -638,7 +846,7 @@ function renderTargetVerification(verification) {
   $("#verify-dns-button").hidden = verified || expired;
   $("#regenerate-verification-button").hidden = !expired;
   if (verified) {
-    $("#scan-button").textContent = "RUN SECURITY SCAN";
+    $("#scan-button").textContent = "START VERIFIED ASSESSMENT";
   }
   panel.hidden = false;
 }
@@ -661,7 +869,7 @@ $("#scan-form").addEventListener("submit", async (event) => {
   setProgress("running");
   message.className = "status-message";
   message.textContent = "Scan running. Waiting for the synchronous backend pipeline…";
-  setButtonLoading(button, true, "START SCAN", "SCANNING…");
+  setButtonLoading(button, true, "START ASSESSMENT", "ASSESSING…");
   try {
     const data = await postJson("/api/scans/run", {
       target_url: $("#scan-target").value,
@@ -690,7 +898,7 @@ $("#scan-form").addEventListener("submit", async (event) => {
       message.textContent = error instanceof Error ? error.message : "Scan failed.";
     }
   } finally {
-    setButtonLoading(button, false, "START SCAN", "SCANNING…");
+    setButtonLoading(button, false, "START ASSESSMENT", "ASSESSING…");
   }
 });
 
@@ -734,7 +942,12 @@ $("#regenerate-verification-button").addEventListener("click", async () => {
 $("#scan-target").addEventListener("input", () => {
   activeVerificationId = null;
   $("#verification-panel").hidden = true;
-  $("#scan-button").textContent = "START SCAN";
+  $("#scan-button").textContent = "START ASSESSMENT";
+  renderTargetContext("#scan-target", "#scan-target-context");
+});
+
+$("#demo-target").addEventListener("input", () => {
+  renderTargetContext("#demo-target", "#demo-target-context");
 });
 
 $("#demo-form").addEventListener("submit", async (event) => {
@@ -796,5 +1009,7 @@ $("#refresh-health").addEventListener("click", refreshHealth);
 
 populateScenarios();
 initializeProgress();
+renderTargetContext("#scan-target", "#scan-target-context");
+renderTargetContext("#demo-target", "#demo-target-context");
 refreshHealth();
 configureDevelopmentDnsBypass();

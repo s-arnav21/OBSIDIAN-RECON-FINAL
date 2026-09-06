@@ -6,7 +6,17 @@ import hashlib
 import json
 from itertools import product
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Sequence, Set, Tuple
+from typing import (
+    AbstractSet,
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 from urllib.parse import urlparse
 
 from app.attack_chain.mitre_mapping import (
@@ -27,6 +37,10 @@ QUEUE_FILE = BACKEND_DIR / "data" / "manual_review_queue.json"
 PATHWAYS_FILE = BACKEND_DIR / "data" / "attack_paths.json"
 
 BASE_CAPABILITIES = frozenset({"unauthenticated"})
+DEFAULT_TERMINAL_CAPABILITIES: frozenset[str] = frozenset()
+
+TERMINATION_TERMINAL_CAPABILITY_REACHED = "terminal_capability_reached"
+TERMINATION_NO_NEW_CAPABILITY = "no_new_capability"
 
 
 def _load_json(path: Path) -> List[Dict[str, Any]]:
@@ -116,6 +130,65 @@ def _sequence_is_valid(sequence: Sequence[Finding]) -> bool:
     return True
 
 
+def _progression_block_reason(
+    finding: Finding,
+    available_capabilities: Set[str],
+    *,
+    is_extension: bool,
+    terminal_capabilities: AbstractSet[str],
+) -> Optional[str]:
+    if terminal_capabilities & available_capabilities:
+        return TERMINATION_TERMINAL_CAPABILITY_REACHED
+    if is_extension and not (
+        set(finding.provides) - available_capabilities
+    ):
+        return TERMINATION_NO_NEW_CAPABILITY
+    return None
+
+
+def _sequence_is_meaningful_progression(
+    sequence: Sequence[Finding],
+    terminal_capabilities: AbstractSet[str],
+) -> bool:
+    """Require valid prerequisites and a capability gain at each extension."""
+    available = set(BASE_CAPABILITIES)
+    for index, finding in enumerate(sequence):
+        if not _requirements_satisfied(finding, available):
+            return False
+        if _progression_block_reason(
+            finding,
+            available,
+            is_extension=index > 0,
+            terminal_capabilities=terminal_capabilities,
+        ) is not None:
+            return False
+        available.update(finding.provides)
+    return True
+
+
+def _normalize_terminal_capabilities(
+    terminal_capabilities: Iterable[str],
+) -> frozenset[str]:
+    if isinstance(terminal_capabilities, (str, bytes)):
+        raise TypeError(
+            "terminal_capabilities must be an iterable of non-empty strings"
+        )
+    try:
+        normalized = frozenset(terminal_capabilities)
+    except TypeError as exc:
+        raise TypeError(
+            "terminal_capabilities must be an iterable of non-empty strings"
+        ) from exc
+    if not all(
+        isinstance(capability, str) and capability
+        for capability in normalized
+    ):
+        raise TypeError(
+            "terminal_capabilities must contain only non-empty strings"
+        )
+    return normalized
+
+
 def _deduplicate_plans(
     plans: Iterable[Tuple[Finding, ...]],
 ) -> List[Tuple[Finding, ...]]:
@@ -156,6 +229,7 @@ def _plans_providing(
     capability: str,
     findings: Sequence[Finding],
     trail: frozenset[str],
+    terminal_capabilities: AbstractSet[str],
 ) -> List[Tuple[Finding, ...]]:
     if capability in BASE_CAPABILITIES:
         return [tuple()]
@@ -166,7 +240,12 @@ def _plans_providing(
             continue
         if capability not in provider.provides:
             continue
-        plans.extend(_plans_for_finding(provider, findings, trail))
+        plans.extend(_plans_for_finding(
+            provider,
+            findings,
+            trail,
+            terminal_capabilities=terminal_capabilities,
+        ))
     return _deduplicate_plans(plans)
 
 
@@ -174,6 +253,8 @@ def _plans_for_finding(
     finding: Finding,
     findings: Sequence[Finding],
     trail: frozenset[str] = frozenset(),
+    *,
+    terminal_capabilities: AbstractSet[str] = DEFAULT_TERMINAL_CAPABILITIES,
 ) -> List[Tuple[Finding, ...]]:
     if finding.finding_id in trail:
         return []
@@ -186,6 +267,7 @@ def _plans_for_finding(
             capability,
             findings,
             next_trail,
+            terminal_capabilities,
         )
         if not provider_plans:
             return []
@@ -199,6 +281,7 @@ def _plans_for_finding(
                 capability,
                 findings,
                 next_trail,
+                terminal_capabilities,
             ))
         any_provider_plans = _deduplicate_plans(any_provider_plans)
         if not any_provider_plans:
@@ -211,7 +294,10 @@ def _plans_for_finding(
     plans: List[Tuple[Finding, ...]] = []
     for selected_plans in product(*requirement_groups):
         merged = _merge_support_plans(selected_plans, finding)
-        if _sequence_is_valid(merged):
+        if _sequence_is_meaningful_progression(
+            merged,
+            terminal_capabilities,
+        ):
             plans.append(merged)
     return _deduplicate_plans(plans)
 
@@ -350,17 +436,27 @@ def _build_chain(path: Sequence[Finding]) -> AttackChain:
     )
 
 
-def build_attack_paths(findings: Sequence[Finding]) -> List[AttackChain]:
+def build_attack_paths(
+    findings: Sequence[Finding],
+    *,
+    terminal_capabilities: Iterable[str] = DEFAULT_TERMINAL_CAPABILITIES,
+) -> List[AttackChain]:
     """
     Build maximal deterministic chains from canonical Finding objects.
 
     Findings are grouped by (scan_id, asset_id). Capability providers from
-    another scan or asset are never considered.
+    another scan or asset are never considered. Terminal capabilities are an
+    explicit opt-in policy; none of the current capability vocabulary is
+    terminal by default.
     """
     if not isinstance(findings, Sequence):
         raise TypeError("findings must be a sequence of Finding objects")
     if not all(isinstance(finding, Finding) for finding in findings):
         raise TypeError("build_attack_paths accepts only Finding objects")
+
+    normalized_terminal_capabilities = _normalize_terminal_capabilities(
+        terminal_capabilities
+    )
 
     usable = [
         enrich_finding_model(finding)
@@ -392,6 +488,7 @@ def build_attack_paths(findings: Sequence[Finding]) -> List[AttackChain]:
             plans.extend(_plans_for_finding(
                 finding,
                 scoped_findings,
+                terminal_capabilities=normalized_terminal_capabilities,
             ))
 
         for plan in _maximal_plans(plans):
