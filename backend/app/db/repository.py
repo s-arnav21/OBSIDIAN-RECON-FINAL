@@ -14,10 +14,13 @@ from app.db.models import (
     AttackChainORM,
     AttackChainStepORM,
     EvidenceORM,
+    ExploitORM,
+    ExploitSessionORM,
     FindingORM,
     MitreMappingORM,
     ScanORM,
     ServiceORM,
+    ShellORM,
     TargetVerificationORM,
     ValidationORM,
 )
@@ -403,6 +406,15 @@ class PersistenceRepository:
         )
         return self.session.scalar(statement)
 
+    def list_scans(self, limit: Optional[int] = None) -> List[ScanORM]:
+        statement = (
+            select(ScanORM)
+            .order_by(ScanORM.created_at.desc(), ScanORM.id.desc())
+        )
+        if limit is not None:
+            statement = statement.limit(limit)
+        return list(self.session.scalars(statement))
+
     def list_findings_for_scan(self, scan_id: str) -> List[FindingORM]:
         statement = (
             select(FindingORM)
@@ -425,3 +437,145 @@ class PersistenceRepository:
             .order_by(AttackChainORM.created_at, AttackChainORM.id)
         )
         return list(self.session.scalars(statement))
+
+    # ------------------------------------------------------------------
+    # Exploitation (sessions, exploits, shells)
+    # ------------------------------------------------------------------
+
+    def create_exploit_session(
+        self,
+        *,
+        session_id: str,
+        scan_id: str,
+        target_url: str,
+        session_name: str,
+        tool_used: Optional[str] = None,
+        status: str = "pending",
+    ) -> ExploitSessionORM:
+        self._require_scan(scan_id)
+        record = ExploitSessionORM(
+            id=session_id,
+            scan_id=scan_id,
+            target_url=target_url,
+            session_name=session_name,
+            tool_used=tool_used,
+            status=status,
+        )
+        self.session.add(record)
+        self.session.flush()
+        return record
+
+    def persist_exploit(
+        self,
+        *,
+        exploit_id: str,
+        session_id: str,
+        module_name: str,
+        finding_id: Optional[str] = None,
+        technique_id: Optional[str] = None,
+        description: Optional[str] = None,
+        outcome: Optional[str] = None,
+        output: Optional[str] = None,
+    ) -> ExploitORM:
+        self._require_exploit_session(session_id)
+        record = ExploitORM(
+            id=exploit_id,
+            session_id=session_id,
+            finding_id=finding_id,
+            technique_id=technique_id,
+            module_name=module_name,
+            description=description,
+            outcome=outcome,
+            output=output,
+        )
+        self.session.add(record)
+        self.session.flush()
+        return record
+
+    def persist_shell(
+        self,
+        *,
+        shell_id: str,
+        session_id: str,
+        shell_type: str,
+        host: Optional[str] = None,
+        port: Optional[int] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        active: bool = False,
+    ) -> ShellORM:
+        self._require_exploit_session(session_id)
+        record = ShellORM(
+            id=shell_id,
+            session_id=session_id,
+            shell_type=shell_type,
+            host=host,
+            port=port,
+            username=username,
+            password=password,
+            active=active,
+        )
+        self.session.add(record)
+        self.session.flush()
+        return record
+
+    def update_exploit_session_status(
+        self,
+        session_id: str,
+        status: str,
+        *,
+        finished_at: Optional[datetime] = None,
+    ) -> ExploitSessionORM:
+        record = self._require_exploit_session(session_id)
+        record.status = status
+        if finished_at is not None:
+            record.finished_at = finished_at
+        self.session.flush()
+        return record
+
+    def get_exploit_session(self, session_id: str) -> Optional[ExploitSessionORM]:
+        statement = (
+            select(ExploitSessionORM)
+            .where(ExploitSessionORM.id == session_id)
+            .options(
+                selectinload(ExploitSessionORM.exploits),
+                selectinload(ExploitSessionORM.shells),
+            )
+        )
+        return self.session.scalar(statement)
+
+    def list_exploit_sessions(self, scan_id: Optional[str] = None) -> List[ExploitSessionORM]:
+        statement = select(ExploitSessionORM)
+        if scan_id:
+            statement = statement.where(ExploitSessionORM.scan_id == scan_id)
+        statement = statement.options(
+            selectinload(ExploitSessionORM.exploits),
+            selectinload(ExploitSessionORM.shells),
+        ).order_by(ExploitSessionORM.created_at, ExploitSessionORM.id)
+        return list(self.session.scalars(statement))
+
+    def list_exploits_for_session(self, session_id: str) -> List[ExploitORM]:
+        statement = (
+            select(ExploitORM)
+            .where(ExploitORM.session_id == session_id)
+            .order_by(ExploitORM.created_at, ExploitORM.id)
+        )
+        return list(self.session.scalars(statement))
+
+    def list_shells_for_session(self, session_id: str) -> List[ShellORM]:
+        statement = (
+            select(ShellORM)
+            .where(ShellORM.session_id == session_id)
+            .order_by(ShellORM.created_at, ShellORM.id)
+        )
+        return list(self.session.scalars(statement))
+
+    def _require_exploit_session(self, session_id: str) -> ExploitSessionORM:
+        record = self.session.scalar(
+            select(ExploitSessionORM).where(ExploitSessionORM.id == session_id)
+        )
+        if record is None:
+            raise PersistenceNotFoundError(
+                f"exploit session {session_id!r} not found"
+            )
+        return record

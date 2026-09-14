@@ -9,6 +9,7 @@ from typing import Callable, Optional, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 from app.scanning.dns import BoundedDnsResolver, DnsLookupError
+from app.core.config import settings
 
 
 class ReconAuthorizationError(ValueError):
@@ -151,22 +152,28 @@ def authorize_target(
             "explicit authorization confirmation is required"
         )
     target = normalize_origin(target_url)
-    if not is_loopback_host(target.hostname):
-        if target.scheme != "https":
-            raise ReconScopeError(
-                "external reconnaissance targets must use HTTPS"
-            )
-        if not ownership_verified:
-            raise TargetVerificationRequiredError(target)
-        addresses = resolve_public_target_addresses(
-            target.hostname,
-            address_resolver=address_resolver,
+    if is_loopback_host(target.hostname):
+        return target
+    if not settings.AUTHORIZATION_RESTRICTED:
+        # Explicit operator opt-out (parity with the legacy pipeline's
+        # AUTHORIZATION_RESTRICTED=false): no HTTPS requirement, no DNS
+        # ownership verification, no public-address enforcement. The operator
+        # confirmation above is the gate.
+        return target
+    if target.scheme != "https":
+        raise ReconScopeError(
+            "external reconnaissance targets must use HTTPS"
         )
-        target = AuthorizedTarget(
-            origin=target.origin,
-            hostname=target.hostname,
-            port=target.port,
-            scheme=target.scheme,
-            resolved_addresses=addresses,
-        )
-    return target
+    if not ownership_verified:
+        raise TargetVerificationRequiredError(target)
+    addresses = resolve_public_target_addresses(
+        target.hostname,
+        address_resolver=address_resolver,
+    )
+    return AuthorizedTarget(
+        origin=target.origin,
+        hostname=target.hostname,
+        port=target.port,
+        scheme=target.scheme,
+        resolved_addresses=addresses,
+    )

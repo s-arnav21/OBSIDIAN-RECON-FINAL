@@ -51,6 +51,19 @@ def create_scan(
     return scan_to_dict(scan)
 
 
+@router.get("")
+def list_scans(
+    limit: int = 25,
+    session: Session = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    repository = PersistenceRepository(session)
+    bounded_limit = max(1, min(limit, 200))
+    return [
+        scan_to_dict(scan)
+        for scan in repository.list_scans(limit=bounded_limit)
+    ]
+
+
 @router.get("/{scan_id}")
 def get_scan(
     scan_id: str,

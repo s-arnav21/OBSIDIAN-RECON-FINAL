@@ -17,7 +17,7 @@ AGENT_LLM_MODEL_ENV = "AGENT_LLM_MODEL"
 AGENT_LLM_TIMEOUT_ENV = "AGENT_LLM_TIMEOUT"
 
 DEFAULT_LLM_TIMEOUT_SECONDS = 15.0
-MAX_LLM_TIMEOUT_SECONDS = 60.0
+MAX_LLM_TIMEOUT_SECONDS = 600.0
 DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024
 ABSOLUTE_MAX_RESPONSE_BYTES = 256 * 1024
 
@@ -157,6 +157,7 @@ class OpenAICompatibleClient:
             "messages": list(messages),
             "temperature": 0,
             "stream": False,
+            "think": False,
             "response_format": response_format,
         }
         headers = {
@@ -201,7 +202,7 @@ class OpenAICompatibleClient:
             payload = json.loads(bytes(body).decode("utf-8"))
             choices = payload["choices"]
             message = choices[0]["message"]
-            content = message["content"]
+            content = message.get("content") or message.get("reasoning") or ""
         except (
             UnicodeDecodeError,
             json.JSONDecodeError,

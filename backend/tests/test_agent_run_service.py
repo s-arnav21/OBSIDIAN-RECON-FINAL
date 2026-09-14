@@ -225,28 +225,138 @@ class AgentRunServiceTests(unittest.TestCase):
         )
         self.assertEqual(result.stop_reason, PolicyDecisionCode.DENIED_DUPLICATE)
 
-    def test_command_execution_simulation_remains_nonautomatic(self):
+    def test_parameter_option_reaches_deterministic_validator(self):
+        service, _client = _service(
+            _action_content(
+                action_id="action-param",
+                options={"parameter_name": "term"},
+            ),
+            COMPLETE_CONTENT,
+        )
+        dispatched = []
+
+        def recording_dispatch(finding, *, session=None):
+            dispatched.append(finding)
+            return _confirmed_sqli(finding, session=session)
+
+        with patch(
+            "app.agent.executor.dispatch",
+            side_effect=recording_dispatch,
+        ):
+            result = service.run(_state(), session=object())
+
+        self.assertEqual(result.status, AgentStatus.COMPLETED)
+        self.assertEqual(result.steps_used, 1)
+        self.assertEqual(dispatched[0].parameter_name, "term")
+        self.assertEqual(
+            result.steps[0].proposed_action.to_dict()["options"],
+            {"parameter_name": "term"},
+        )
+
+    def test_reflection_retry_with_different_options_is_allowed(self):
+        service, client = _service(
+            _action_content(
+                action_id="action-param-id",
+                options={"parameter_name": "id"},
+            ),
+            _action_content(
+                action_id="action-param-term",
+                options={"parameter_name": "term"},
+            ),
+            COMPLETE_CONTENT,
+        )
+
+        with patch(
+            "app.agent.executor.dispatch",
+            side_effect=_confirmed_sqli,
+        ) as deterministic_dispatch:
+            result = service.run(_state(), session=object())
+
+        self.assertEqual(deterministic_dispatch.call_count, 2)
+        self.assertEqual(result.status, AgentStatus.COMPLETED)
+        self.assertEqual(result.stop_reason, "planner_completed")
+        self.assertEqual(result.steps_used, 2)
+        self.assertTrue(result.steps[0].policy_decision.allowed)
+        self.assertTrue(result.steps[1].policy_decision.allowed)
+
+    def test_identical_option_retry_is_denied_as_duplicate(self):
+        service, _client = _service(
+            _action_content(
+                action_id="action-param-a",
+                options={"parameter_name": "id"},
+            ),
+            _action_content(
+                action_id="action-param-b",
+                options={"parameter_name": "id"},
+            ),
+        )
+
+        with patch(
+            "app.agent.executor.dispatch",
+            side_effect=_confirmed_sqli,
+        ):
+            result = service.run(_state(), session=object())
+
+        self.assertEqual(result.status, AgentStatus.BLOCKED)
+        self.assertEqual(result.stop_reason, PolicyDecisionCode.DENIED_DUPLICATE)
+        self.assertEqual(result.steps_used, 2)
+        self.assertTrue(result.steps[0].policy_decision.allowed)
+        self.assertEqual(
+            result.steps[1].policy_decision.code,
+            PolicyDecisionCode.DENIED_DUPLICATE,
+        )
+
+    def test_command_execution_simulation_requires_authorization_and_prerequisite(self):
         content = _action_content(
             action_id="action-command",
             tool_id="validate-command-execution-simulation",
             finding_id="finding-command",
             expected_capabilities=["application_compromise"],
         )
-        service, _client = _service(content)
+
+        unauthorized_state = replace(
+            _state(findings=[_command_finding()]),
+            authorized=False,
+            capabilities=("unauthenticated", "application_compromise"),
+        )
+        unauthorized_service, _unauthorized_client = _service(content)
+        with patch("app.agent.executor.dispatch") as deterministic_dispatch:
+            result = unauthorized_service.run(
+                unauthorized_state,
+                session=object(),
+            )
+        deterministic_dispatch.assert_not_called()
+        self.assertEqual(result.status, AgentStatus.BLOCKED)
+        self.assertEqual(
+            result.stop_reason,
+            PolicyDecisionCode.DENIED_UNAUTHORIZED,
+        )
+
+        service, _client = _service(content, COMPLETE_CONTENT)
         state = replace(
             _state(findings=[_command_finding()]),
             capabilities=("unauthenticated", "application_compromise"),
         )
-
-        with patch("app.agent.executor.dispatch") as deterministic_dispatch:
+        with patch(
+            "app.agent.executor.dispatch",
+            side_effect=_confirmed_sqli,
+        ) as deterministic_dispatch:
             result = service.run(state, session=object())
 
-        deterministic_dispatch.assert_not_called()
+        deterministic_dispatch.assert_called_once()
+        self.assertEqual(result.status, AgentStatus.COMPLETED)
+        self.assertEqual(result.stop_reason, "planner_completed")
+        self.assertEqual(result.steps_used, 1)
+        step = result.steps[0]
+        self.assertTrue(step.policy_decision.allowed)
         self.assertEqual(
-            result.stop_reason,
-            PolicyDecisionCode.DENIED_NOT_AUTOMATIC,
+            step.policy_decision.code,
+            PolicyDecisionCode.ALLOWED,
         )
-        self.assertFalse(result.steps[0].policy_decision.allowed)
+        self.assertEqual(
+            result.final_state.finding_by_id("finding-command").validation_status,
+            "confirmed",
+        )
 
     def test_malformed_or_failed_provider_output_returns_bounded_failure(self):
         cases = (

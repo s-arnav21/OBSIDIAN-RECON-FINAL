@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 from app.attack_chain.engine import BASE_CAPABILITIES
 from app.attack_chain.mitre_mapping import enrich_finding_model
-from app.models.finding import Finding, ValidationStatus
+from app.models.finding import Finding, ParameterLocation, ValidationStatus
 from app.scanning.scope import ReconScopeError, normalize_origin
 
 
@@ -17,6 +17,24 @@ MAX_STATE_COLLECTION_ITEMS = 100
 MAX_REASON_LENGTH = 256
 MAX_SUMMARY_LENGTH = 512
 MAX_PLANNER_FIELD_LENGTH = 512
+
+# Bounded targeting options an operator-style planner may attach to an action.
+# The LLM selects where/how to probe (same-origin path, method, parameter,
+# placement); deterministic validators still craft every payload.
+MAX_ACTION_OPTIONS = 4
+MAX_ACTION_OPTION_VALUE_LENGTH = 512
+ACTION_OPTION_KEYS = frozenset({
+    "endpoint",
+    "http_method",
+    "parameter_name",
+    "parameter_location",
+})
+_ACTION_HTTP_METHODS = frozenset({"GET", "POST", "PUT", "PATCH"})
+_ACTION_PARAMETER_LOCATIONS = frozenset(
+    location
+    for location in ParameterLocation.SUPPORTED
+    if location != ParameterLocation.PATH
+)
 
 
 class AgentStatus:
@@ -77,9 +95,67 @@ def _same_origin(left: str, right: str) -> bool:
         return False
 
 
+def _normalize_options(
+    options: Any,
+) -> Tuple[Tuple[str, str], ...]:
+    """Canonicalize bounded targeting options into sorted (key, value) pairs.
+
+    Option keys are allowlisted, values are non-empty printable strings with
+    strict enums for ``http_method`` and ``parameter_location``. The options
+    tuple is sorted so equal option sets compare equal regardless of order.
+    """
+    if isinstance(options, (str, bytes)):
+        raise TypeError("agent action options must be a mapping or pair list")
+    if isinstance(options, Mapping):
+        items = list(options.items())
+    else:
+        items = list(options)
+    if len(items) > MAX_ACTION_OPTIONS:
+        raise ValueError("agent action options exceeds its size limit")
+    seen = set()
+    normalized = []
+    for item in items:
+        if not isinstance(item, (tuple, list)) or len(item) != 2:
+            raise TypeError(
+                "agent action options must be (key, value) pairs"
+            )
+        key, value = item
+        if not isinstance(key, str) or key not in ACTION_OPTION_KEYS:
+            raise ValueError(f"unsupported agent action option {key!r}")
+        if key in seen:
+            raise ValueError(f"duplicate agent action option {key!r}")
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                f"agent action option {key!r} must be a non-empty string"
+            )
+        value = value.strip()
+        if len(value) > MAX_ACTION_OPTION_VALUE_LENGTH:
+            raise ValueError(
+                f"agent action option {key!r} exceeds its maximum length"
+            )
+        if any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise ValueError(
+                f"agent action option {key!r} contains control characters"
+            )
+        if key == "http_method":
+            value = value.upper()
+            if value not in _ACTION_HTTP_METHODS:
+                raise ValueError(f"unsupported agent action http_method {value!r}")
+        elif key == "parameter_location":
+            location = ParameterLocation.normalize(value)
+            if location not in _ACTION_PARAMETER_LOCATIONS:
+                raise ValueError(
+                    f"unsupported agent action parameter_location {value!r}"
+                )
+            value = location
+        seen.add(key)
+        normalized.append((key, value))
+    return tuple(sorted(normalized))
+
+
 @dataclass(frozen=True)
 class AgentAction:
-    """A planner may select only one registered tool for one scoped finding."""
+    """A planner may select one registered tool for one scoped finding."""
 
     action_id: str
     tool_id: str
@@ -89,6 +165,7 @@ class AgentAction:
     target: str
     reason: str
     expected_capabilities: Tuple[str, ...] = field(default_factory=tuple)
+    options: Tuple[Tuple[str, str], ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         for name in (
@@ -121,6 +198,12 @@ class AgentAction:
                 "expected_capabilities",
             ),
         )
+        object.__setattr__(self, "options", _normalize_options(self.options))
+
+    @property
+    def options_key(self) -> Tuple[Tuple[str, str], ...]:
+        """Canonical duplicate-key: equal options deduplicate, variants retry."""
+        return self.options
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -132,6 +215,7 @@ class AgentAction:
             "target": self.target,
             "reason": self.reason,
             "expected_capabilities": list(self.expected_capabilities),
+            "options": dict(self.options),
         }
 
     @classmethod
@@ -147,13 +231,14 @@ class AgentAction:
             "target",
             "reason",
             "expected_capabilities",
+            "options",
         }
         extras = sorted(set(data) - allowed)
         if extras:
             raise ValueError(
                 "unsupported AgentAction fields: " + ", ".join(extras)
             )
-        required = allowed - {"expected_capabilities"}
+        required = allowed - {"expected_capabilities", "options"}
         missing = sorted(required - set(data))
         if missing:
             raise ValueError(
@@ -176,6 +261,12 @@ class AgentObservation:
     validation_status: Optional[str] = None
     capabilities_gained: Tuple[str, ...] = field(default_factory=tuple)
     error_category: Optional[str] = None
+    validation_decision: Optional[str] = None
+    detection_methods: Tuple[str, ...] = field(default_factory=tuple)
+    observed_http_status: Optional[int] = None
+    observed_response_length: Optional[int] = None
+    waf_or_filter_interference: bool = False
+    options_used: Tuple[Tuple[str, str], ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         for name in ("action_id", "tool_id", "policy_decision"):
@@ -218,6 +309,37 @@ class AgentObservation:
             "error_category",
             _optional_string(self.error_category, "error_category"),
         )
+        object.__setattr__(
+            self,
+            "validation_decision",
+            _optional_string(
+                self.validation_decision,
+                "validation_decision",
+                maximum=MAX_SUMMARY_LENGTH,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "detection_methods",
+            _string_tuple(self.detection_methods, "detection_methods"),
+        )
+        for name, maximum in (
+            ("observed_http_status", 599),
+            ("observed_response_length", 10_000_000),
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise TypeError(f"{name} must be an integer or None")
+                if not 0 <= value <= maximum:
+                    raise ValueError(f"{name} is outside the supported range")
+        if type(self.waf_or_filter_interference) is not bool:
+            raise TypeError("waf_or_filter_interference must be a boolean")
+        object.__setattr__(
+            self,
+            "options_used",
+            _normalize_options(self.options_used),
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -231,6 +353,12 @@ class AgentObservation:
             "capabilities_gained": list(self.capabilities_gained),
             "summary": self.summary,
             "error_category": self.error_category,
+            "validation_decision": self.validation_decision,
+            "detection_methods": list(self.detection_methods),
+            "observed_http_status": self.observed_http_status,
+            "observed_response_length": self.observed_response_length,
+            "waf_or_filter_interference": self.waf_or_filter_interference,
+            "options_used": list(self.options_used),
         }
 
 
@@ -416,9 +544,10 @@ class AgentState:
         )
 
     @property
-    def executed_tool_findings(self) -> frozenset[tuple[str, str]]:
+    def executed_tool_findings(self) -> frozenset[tuple[str, str, tuple]]:
+        """Executed (tool, finding, options) fingerprints for deduplication."""
         return frozenset(
-            (observation.tool_id, observation.finding_id)
+            (observation.tool_id, observation.finding_id, observation.options_used)
             for observation in self.observations
             if observation.policy_allowed and observation.finding_id is not None
         )

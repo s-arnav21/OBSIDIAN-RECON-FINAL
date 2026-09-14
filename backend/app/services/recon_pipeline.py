@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.attack_chain.engine import build_attack_paths
 from app.attack_chain.mitre_mapping import enrich_finding_model
+from app.core.config import settings
 from app.models.attack_chain import AttackChain
 from app.models.finding import Finding, ValidationStatus
 from app.models.validation import ValidationResult
@@ -154,12 +155,14 @@ class ReconPipeline:
         session: Session,
     ) -> ReconRun:
         normalized_target = normalize_origin(target_url)
-        ownership_verified = is_loopback_host(normalized_target.hostname)
-        if not ownership_verified:
-            ownership_verified = self.target_verification_service.is_origin_verified(
-                session,
-                normalized_target.origin,
-            )
+        ownership_verified = True
+        if settings.AUTHORIZATION_RESTRICTED:
+            ownership_verified = is_loopback_host(normalized_target.hostname)
+            if not ownership_verified:
+                ownership_verified = self.target_verification_service.is_origin_verified(
+                    session,
+                    normalized_target.origin,
+                )
         target = authorize_target(
             target_url,
             authorized=authorized,

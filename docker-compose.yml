@@ -19,6 +19,8 @@ services:
     build: ./backend
     ports:
       - "8000:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./backend:/app
     env_file:
@@ -27,9 +29,14 @@ services:
       - postgres
       - redis
 
+  adminer:
+    image: adminer
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+
   demo-target:
-    profiles:
-      - demo
     build: ./backend
     command:
       - uvicorn

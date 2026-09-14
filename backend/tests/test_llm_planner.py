@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 import json
 import unittest
+from unittest.mock import patch
 
 import httpx
 
@@ -19,11 +20,12 @@ from app.agent.llm_planner import (
     LLMPlanner,
     LLMPlanningError,
 )
-from app.agent.models import AgentState, AgentStatus
+from app.agent.models import AgentObservation, AgentState, AgentStatus
 from app.agent.orchestrator import AgentOrchestrator
 from app.agent.policy import AgentPolicyGate
 from app.agent.tools import AgentToolRegistry
 from app.models.finding import Finding, ValidationStatus
+from app.models.validation import ValidationResult
 
 
 ORIGIN = "http://127.0.0.1:8090"
@@ -180,6 +182,63 @@ class LLMPlannerParsingTests(unittest.TestCase):
         self.assertEqual(planned.finding_id, FINDING_ID)
         self.assertEqual(planned.scan_id, SCAN_ID)
         self.assertEqual(planned.expected_capabilities, ("discovered_services",))
+
+    def test_valid_json_with_supported_options_maps_to_agent_action(self):
+        planned = self.plan(_action_content(options={"endpoint": "/debug/health"}))
+        self.assertEqual(planned.tool_id, "validate-exposed-resource")
+        self.assertEqual(
+            dict(planned.options),
+            {"endpoint": "/debug/health"},
+        )
+        self.assertEqual(
+            planned.to_dict()["options"],
+            {"endpoint": "/debug/health"},
+        )
+
+    def test_unknown_or_malformed_option_is_rejected_closed(self):
+        cases = (
+            {"payload": "x"},
+            {123: "x"},
+            {"endpoint": 5},
+            {"endpoint": "line\nbreak"},
+        )
+        for options in cases:
+            with self.subTest(options=options):
+                with self.assertRaises(LLMPlanningError) as raised:
+                    self.plan(_action_content(options=options))
+                self.assertEqual(raised.exception.category, "invalid_schema")
+
+    def test_planner_receives_tool_allowlist_and_reflection_observation_fields(self):
+        observation = AgentObservation(
+            action_id="obs-1",
+            tool_id="validate-exposed-resource",
+            finding_id=FINDING_ID,
+            policy_decision="allowed",
+            policy_allowed=True,
+            execution_status="completed",
+            validation_status="manual_review",
+            summary="Inconclusive; different targeting may confirm.",
+            validation_decision="incomplete_or_ambiguous_coverage",
+            detection_methods=("boolean-response-differential",),
+            observed_http_status=200,
+            observed_response_length=512,
+            waf_or_filter_interference=False,
+            options_used=(("endpoint", "/debug/config"),),
+        )
+        state = self.state.to_dict()
+        state["observations"] = [observation.to_dict()]
+        client = FakeCompletionClient([COMPLETE_CONTENT])
+        planner = LLMPlanner(client)
+
+        self.assertIsNone(planner.propose_action(state, self.tools))
+
+        transmitted = client.calls[0][0][-1]["content"]
+        self.assertIn("allowed_options", transmitted)
+        self.assertIn("validation_decision", transmitted)
+        self.assertIn("detection_methods", transmitted)
+        self.assertIn("observed_http_status", transmitted)
+        self.assertIn("waf_or_filter_interference", transmitted)
+        self.assertIn("options_used", transmitted)
 
     def test_explicit_completion_maps_to_none(self):
         self.assertIsNone(self.plan(COMPLETE_CONTENT))
@@ -426,8 +485,19 @@ class OpenAICompatibleClientTests(unittest.TestCase):
                 self.assertNotIn(TEST_API_KEY, str(raised.exception))
 
 
+def _confirmed_command(_finding, *, session=None) -> ValidationResult:
+    del session
+    return ValidationResult(
+        status=ValidationStatus.CONFIRMED,
+        confidence=0.9,
+        validator="generic_http_command_execution",
+        method="test-controlled deterministic validation",
+        evidence={"decision": "confirmed"},
+    )
+
+
 class LLMPlannerOrchestrationTests(unittest.TestCase):
-    def test_model_cannot_bypass_nonautomatic_policy(self):
+    def test_command_execution_runs_when_authorized_with_prerequisite(self):
         state = _state(findings=[_command_finding()])
         state = replace(
             state,
@@ -438,14 +508,44 @@ class LLMPlannerOrchestrationTests(unittest.TestCase):
             finding_id="finding-command",
             expected_capabilities=["application_compromise"],
         )
+        planner = LLMPlanner(
+            FakeCompletionClient([content, COMPLETE_CONTENT])
+        )
+
+        with patch(
+            "app.agent.executor.dispatch",
+            side_effect=_confirmed_command,
+        ) as deterministic_dispatch:
+            final = _runtime(planner).run(state, session=object())
+
+        deterministic_dispatch.assert_called_once()
+        self.assertEqual(final.status, AgentStatus.COMPLETED)
+        self.assertEqual(final.terminal_reason, "planner_completed")
+        self.assertEqual(
+            final.finding_by_id("finding-command").validation_status,
+            "confirmed",
+        )
+
+    def test_command_execution_denied_when_unauthorized(self):
+        state = _state(findings=[_command_finding()])
+        state = replace(
+            state,
+            authorized=False,
+            capabilities=("unauthenticated", "application_compromise"),
+        )
+        content = _action_content(
+            tool_id="validate-command-execution-simulation",
+            finding_id="finding-command",
+            expected_capabilities=["application_compromise"],
+        )
         planner = LLMPlanner(FakeCompletionClient([content]))
 
-        final = _runtime(planner).run(state, session=object())
+        with patch("app.agent.executor.dispatch") as deterministic_dispatch:
+            final = _runtime(planner).run(state, session=object())
 
+        deterministic_dispatch.assert_not_called()
         self.assertEqual(final.status, AgentStatus.BLOCKED)
-        self.assertEqual(final.terminal_reason, "denied_not_automatic")
-        finding = final.finding_by_id("finding-command")
-        self.assertEqual(finding.validation_status, "detected")
+        self.assertEqual(final.terminal_reason, "denied_unauthorized")
 
     def test_deterministic_validator_remains_source_of_truth(self):
         client = FakeCompletionClient([_action_content(), COMPLETE_CONTENT])

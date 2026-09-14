@@ -22,6 +22,7 @@ class PolicyDecisionCode:
     DENIED_SCOPE = "denied_scope"
     DENIED_WRONG_FINDING = "denied_wrong_finding"
     DENIED_INCOMPATIBLE_TOOL = "denied_incompatible_tool"
+    DENIED_OPTIONS = "denied_options"
     DENIED_PREREQUISITE = "denied_prerequisite"
     DENIED_DUPLICATE = "denied_duplicate"
     DENIED_STEP_LIMIT = "denied_step_limit"
@@ -64,6 +65,25 @@ def _same_origin(left: str, right: str) -> bool:
         return normalize_origin(left).origin == normalize_origin(right).origin
     except ReconScopeError:
         return False
+
+
+def _option_endpoint_in_scope(endpoint: str, target: str) -> bool:
+    """Absolute option endpoints must match the trusted origin; relative paths inherit it."""
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(endpoint)
+    if not (parts.scheme or parts.netloc):
+        return True
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        return False
+    try:
+        endpoint_origin = normalize_origin(
+            f"{parts.scheme}://{parts.netloc}"
+        ).origin
+        target_origin = normalize_origin(target).origin
+    except ReconScopeError:
+        return False
+    return endpoint_origin == target_origin
 
 
 class AgentPolicyGate:
@@ -167,6 +187,27 @@ class AgentPolicyGate:
                 code=PolicyDecisionCode.DENIED_INCOMPATIBLE_TOOL,
                 reason="The tool is not compatible with the selected finding.",
             )
+        for key, value in action.options:
+            if key not in tool.allowed_options:
+                return _decision(
+                    action,
+                    allowed=False,
+                    code=PolicyDecisionCode.DENIED_OPTIONS,
+                    reason=(
+                        f"Tool {tool.tool_id!r} does not allow the {key!r} "
+                        "targeting option."
+                    ),
+                )
+            if key == "endpoint" and not _option_endpoint_in_scope(
+                value,
+                state.target,
+            ):
+                return _decision(
+                    action,
+                    allowed=False,
+                    code=PolicyDecisionCode.DENIED_OPTIONS,
+                    reason="The endpoint option is outside the trusted origin.",
+                )
         if not tool.automatic_allowed:
             return _decision(
                 action,
@@ -176,7 +217,7 @@ class AgentPolicyGate:
             )
         if (
             action.action_id in state.executed_action_ids
-            or (action.tool_id, action.finding_id)
+            or (action.tool_id, action.finding_id, action.options_key)
             in state.executed_tool_findings
         ):
             return _decision(

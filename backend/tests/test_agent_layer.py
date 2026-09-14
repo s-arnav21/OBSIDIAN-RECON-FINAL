@@ -133,6 +133,7 @@ def action(
     finding_id="finding-exposure",
     target=ORIGIN,
     expected_capabilities=(),
+    options=(),
 ) -> AgentAction:
     return AgentAction(
         action_id=action_id,
@@ -143,6 +144,7 @@ def action(
         target=target,
         reason="Validate the normalized candidate using a registered tool.",
         expected_capabilities=expected_capabilities,
+        options=options,
     )
 
 
@@ -282,19 +284,19 @@ class AgentToolRegistryTests(unittest.TestCase):
         with self.assertRaises(UnknownAgentToolError):
             AgentToolRegistry().require("shell")
 
-    def test_command_simulation_is_visible_but_not_automatic(self):
+    def test_command_simulation_is_visible_and_automatic_for_capstone(self):
         tool = AgentToolRegistry().require(
             "validate-command-execution-simulation"
         )
-        self.assertFalse(tool.automatic_allowed)
+        self.assertTrue(tool.automatic_allowed)
 
-    def test_system_information_simulation_is_not_automatic(self):
+    def test_system_information_simulation_is_automatic_with_prerequisite(self):
         tool = AgentToolRegistry().require(
             "validate-system-information-discovery-simulation"
         )
         self.assertEqual(tool.requires_any, ("command_execution",))
         self.assertEqual(tool.provides, ("system_information",))
-        self.assertFalse(tool.automatic_allowed)
+        self.assertTrue(tool.automatic_allowed)
 
 
 class AgentPolicyTests(unittest.TestCase):
@@ -401,7 +403,14 @@ class AgentPolicyTests(unittest.TestCase):
         self.assert_decision(action(), PolicyDecisionCode.DENIED_STEP_LIMIT)
 
     def test_nonautomatic_tool_is_denied_even_with_prerequisite(self):
-        self.state = AgentState.from_findings(
+        command_tool = AgentToolRegistry().require(
+            "validate-command-execution-simulation"
+        )
+        registry = AgentToolRegistry(
+            [replace(command_tool, automatic_allowed=False)]
+        )
+        policy = AgentPolicyGate(registry)
+        state = AgentState.from_findings(
             scan_id=SCAN_ID,
             target=ORIGIN,
             asset_id=ASSET_ID,
@@ -409,20 +418,22 @@ class AgentPolicyTests(unittest.TestCase):
             findings=[command_finding()],
             maximum_steps=2,
         )
-        self.state = replace(
-            self.state,
+        state = replace(
+            state,
             capabilities=("unauthenticated", "application_compromise"),
         )
         requested = action(
             tool_id="validate-command-execution-simulation",
             finding_id="finding-command",
         )
-        self.assert_decision(
-            requested,
+        decision = policy.evaluate(requested, state)
+        self.assertEqual(
+            decision.code,
             PolicyDecisionCode.DENIED_NOT_AUTOMATIC,
         )
+        self.assertFalse(decision.allowed)
 
-    def test_agent_cannot_bypass_system_information_policy(self):
+    def test_system_information_enforces_prerequisite_even_when_automatic(self):
         self.state = AgentState.from_findings(
             scan_id=SCAN_ID,
             target=ORIGIN,
@@ -433,18 +444,169 @@ class AgentPolicyTests(unittest.TestCase):
         )
         self.state = replace(
             self.state,
-            capabilities=("unauthenticated", "command_execution"),
+            capabilities=("unauthenticated",),
         )
         requested = action(
             tool_id="validate-system-information-discovery-simulation",
             finding_id="finding-system-information",
             expected_capabilities=("command_execution",),
         )
-
         self.assert_decision(
             requested,
-            PolicyDecisionCode.DENIED_NOT_AUTOMATIC,
+            PolicyDecisionCode.DENIED_PREREQUISITE,
         )
+        self.state = replace(
+            self.state,
+            capabilities=("unauthenticated", "command_execution"),
+        )
+        self.assert_decision(
+            requested,
+            PolicyDecisionCode.ALLOWED,
+            True,
+        )
+
+
+class AgentOptionTests(unittest.TestCase):
+    """Bounded targeting options: allowlist, enums, origin, and dedup keying."""
+
+    def sqli_finding(self):
+        return Finding(
+            finding_id="finding-sqli",
+            scan_id=SCAN_ID,
+            asset_id=ASSET_ID,
+            target=ORIGIN,
+            host="127.0.0.1",
+            source="nuclei",
+            vulnerability_type="sql_injection",
+            validator_id="generic-http-sqli",
+            endpoint="/items",
+            http_method="GET",
+            parameter_name="id",
+            parameter_location="query",
+            severity="high",
+        )
+
+    def setUp(self):
+        self.registry = AgentToolRegistry()
+        self.policy = AgentPolicyGate(self.registry)
+        self.state = agent_state(
+            findings=[reachability_finding(), self.sqli_finding()]
+        )
+
+    def optioned_action(self, **updates):
+        data = dict(
+            action_id="action-opted",
+            tool_id="validate-sql-injection",
+            finding_id="finding-sqli",
+            options={
+                "endpoint": "/search",
+                "http_method": "POST",
+                "parameter_name": "term",
+                "parameter_location": "form",
+            },
+        )
+        data.update(updates)
+        return action(**data)
+
+    def assert_decision(self, requested, code, allowed=False):
+        decision = self.policy.evaluate(requested, self.state)
+        self.assertEqual(decision.code, code)
+        self.assertEqual(decision.allowed, allowed)
+        return decision
+
+    def test_registered_options_within_allowlist_are_approved(self):
+        decision = self.policy.evaluate(self.optioned_action(), self.state)
+        self.assertEqual(decision.code, PolicyDecisionCode.ALLOWED)
+        self.assertTrue(decision.allowed)
+
+    def test_same_origin_absolute_endpoint_option_is_approved(self):
+        requested = self.optioned_action(options={
+            "endpoint": f"{ORIGIN}/items",
+        })
+        decision = self.policy.evaluate(requested, self.state)
+        self.assertEqual(decision.code, PolicyDecisionCode.ALLOWED)
+
+    def test_tool_without_option_support_is_denied(self):
+        requested = action(
+            action_id="action-cmd-option",
+            tool_id="validate-command-execution-simulation",
+            finding_id="finding-command",
+            options={"endpoint": "/diagnostics"},
+        )
+        state = agent_state(
+            findings=[command_finding()],
+            maximum_steps=2,
+        )
+        state = replace(
+            state,
+            capabilities=("unauthenticated", "application_compromise"),
+        )
+        decision = self.policy.evaluate(requested, state)
+        self.assertEqual(decision.code, PolicyDecisionCode.DENIED_OPTIONS)
+        self.assertFalse(decision.allowed)
+
+    def test_enum_violating_option_is_rejected_at_construction(self):
+        with self.assertRaisesRegex(ValueError, "http_method"):
+            action(
+                action_id="action-opt-enum",
+                tool_id="validate-sql-injection",
+                finding_id="finding-sqli",
+                options={"http_method": "TRACE"},
+            )
+
+    def test_cross_origin_endpoint_option_is_denied(self):
+        requested = self.optioned_action(options={
+            "endpoint": "http://127.0.0.1:9999/items",
+        })
+        decision = self.policy.evaluate(requested, self.state)
+        self.assertEqual(decision.code, PolicyDecisionCode.DENIED_OPTIONS)
+        self.assertFalse(decision.allowed)
+
+    def test_options_are_duplicate_key_and_variant_retries_are_bounded(self):
+        first = self.optioned_action(
+            action_id="action-sqli-a",
+            options={"parameter_name": "id"},
+        )
+        identical = self.optioned_action(
+            action_id="action-sqli-b",
+            options={"parameter_name": "id"},
+        )
+        variant = self.optioned_action(
+            action_id="action-sqli-c",
+            options={"parameter_name": "term"},
+        )
+        self.assertEqual(first.options_key, identical.options_key)
+        self.assertNotEqual(first.options_key, variant.options_key)
+
+        prior = AgentObservation(
+            action_id="action-sqli-a",
+            tool_id="validate-sql-injection",
+            finding_id="finding-sqli",
+            policy_decision="allowed",
+            policy_allowed=True,
+            execution_status="completed",
+            validation_status="manual_review",
+            summary="Inconclusive; retry a different parameter.",
+            options_used=first.options_key,
+        )
+        self.state = replace(
+            self.state,
+            observations=(prior,),
+            executed_action_ids=("action-sqli-a",),
+        )
+        self.assert_decision(
+            identical,
+            PolicyDecisionCode.DENIED_DUPLICATE,
+        )
+        self.assert_decision(variant, PolicyDecisionCode.ALLOWED, True)
+
+    def test_unknown_option_key_is_rejected_at_construction(self):
+        with self.assertRaisesRegex(ValueError, "unsupported agent action option"):
+            AgentAction.from_dict({
+                **action(tool_id="validate-sql-injection",
+                         finding_id="finding-sqli").to_dict(),
+                "options": {"payload": "1 OR 1=1"},
+            })
 
 
 class AgentExecutorTests(unittest.TestCase):
@@ -499,6 +661,31 @@ class AgentExecutorTests(unittest.TestCase):
         )
         self.assertNotIn("database-password", serialized)
         self.assertNotIn("secret", serialized)
+
+    def test_option_endpoint_is_applied_before_dispatch(self):
+        session = ScopedSession()
+        result = self.executor.execute(
+            action(
+                action_id="action-option",
+                options={"endpoint": "/health"},
+            ),
+            self.state,
+            session=session,
+        )
+        self.assertTrue(result.policy.allowed)
+        self.assertEqual(session.urls, [f"{ORIGIN}/health"])
+
+    def test_observation_carries_sanitized_reflection_evidence(self):
+        session = ScopedSession()
+        result = self.executor.execute(action(), self.state, session=session)
+        observation = result.observation
+        self.assertEqual(observation.execution_status, "completed")
+        self.assertEqual(observation.validation_decision, "confirmed")
+        self.assertEqual(observation.observed_http_status, 200)
+        self.assertIsInstance(observation.observed_response_length, int)
+        serialized = str(observation.to_dict())
+        self.assertNotIn("test-value", serialized)
+        self.assertNotIn("PASSWORD", serialized)
 
 
 class AgentOrchestratorTests(unittest.TestCase):

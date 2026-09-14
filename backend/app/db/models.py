@@ -294,3 +294,86 @@ class AttackChainStepORM(Base):
 
     chain: Mapped[AttackChainORM] = relationship(back_populates="steps")
     finding: Mapped[Optional[FindingORM]] = relationship(back_populates="chain_steps")
+
+
+class ExploitSessionORM(Base):
+    """An exploitation session tied to a scan/target."""
+
+    __tablename__ = "exploit_sessions"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    scan_id: Mapped[str] = mapped_column(
+        ForeignKey("scans.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    target_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    session_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    tool_used: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(String(64), nullable=False, default="pending")
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    finished_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+    scan: Mapped[ScanORM] = relationship()
+    exploits: Mapped[List["ExploitORM"]] = relationship(
+        back_populates="session", cascade="all, delete-orphan"
+    )
+    shells: Mapped[List["ShellORM"]] = relationship(
+        back_populates="session", cascade="all, delete-orphan"
+    )
+
+
+class ExploitORM(Base):
+    """A single exploit attempt launched against a finding/session."""
+
+    __tablename__ = "exploits"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("exploit_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    finding_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("findings.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    technique_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    module_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
+    outcome: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    output: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+    session: Mapped[ExploitSessionORM] = relationship(back_populates="exploits")
+    finding: Mapped[Optional[FindingORM]] = relationship()
+
+
+class ShellORM(Base):
+    """A shell / credential obtained through exploitation."""
+
+    __tablename__ = "shells"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("exploit_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    shell_type: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    host: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    port: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    username: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    password: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+    session: Mapped[ExploitSessionORM] = relationship(back_populates="shells")

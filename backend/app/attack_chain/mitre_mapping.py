@@ -82,6 +82,7 @@ TECHNIQUE_DEFINITIONS: Dict[str, TechniqueDefinition] = {
             "remote_code_execution",
             "command_injection",
             "deserialization",
+             "reconnaissance",
         ],
         cwe_hints=["CWE-89", "CWE-78", "CWE-502"],
         owasp_hints=["A03:2021"],

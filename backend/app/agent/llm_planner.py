@@ -14,12 +14,13 @@ MAX_PLANNER_CONTENT_BYTES = 64 * 1024
 MAX_PLANNER_TOOLS = 32
 MAX_PLANNER_FINDINGS = 100
 
-SYSTEM_INSTRUCTION = """You are the bounded security planner for Obsidian Recon.
-You may select one tool from the supplied registered tool catalog or complete.
-You are not a vulnerability source of truth and cannot confirm findings.
-Never create commands, payloads, URLs, scanner flags, HTTP requests, or code.
-Preserve the supplied scan, asset, target, finding, and capability identifiers.
-Return only JSON matching the supplied schema. Do not return analysis or hidden reasoning.
+SYSTEM_INSTRUCTION = """You are the autonomous operator for an authorized Obsidian Recon assessment.
+Select exactly one registered tool for one in-scope finding, or decide the work is complete.
+You may attach targeting options to an action, choosing from the keys a tool advertises in allowed_options (endpoint, http_method, parameter_name, parameter_location). Endpoint options must stay on the trusted origin or be a relative path.
+You are not a payload author: deterministic validators always craft the exploit requests. You control where and how a finding is probed, never the payload itself.
+You may iterate from prior observations: an inconclusive result may be retried on the same finding with different targeting options to drive the attack chain forward, but repeating an identical action is a duplicate and will be denied.
+Preserve the supplied scan, asset, target, finding, capability, and technique identifiers.
+Return only JSON: either {"decision":"action","action":{...}} or {"decision":"complete","action":null}. Do not return analysis or hidden reasoning.
 Deterministic policy and validators independently decide whether an action is permitted and what its validation status is."""
 
 _STATE_FIELDS = (
@@ -70,6 +71,12 @@ _OBSERVATION_FIELDS = (
     "capabilities_gained",
     "summary",
     "error_category",
+    "validation_decision",
+    "detection_methods",
+    "observed_http_status",
+    "observed_response_length",
+    "waf_or_filter_interference",
+    "options_used",
 )
 _TOOL_FIELDS = (
     "tool_id",
@@ -80,58 +87,11 @@ _TOOL_FIELDS = (
     "requires_any",
     "provides",
     "automatic_allowed",
+    "allowed_options",
 )
 
-AGENT_ACTION_RESPONSE_FORMAT: Dict[str, Any] = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "obsidian_agent_plan",
-        "strict": True,
-        "schema": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["decision", "action"],
-            "properties": {
-                "decision": {
-                    "type": "string",
-                    "enum": ["action", "complete"],
-                },
-                "action": {
-                    "anyOf": [
-                        {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "required": [
-                                "action_id",
-                                "tool_id",
-                                "scan_id",
-                                "asset_id",
-                                "finding_id",
-                                "target",
-                                "reason",
-                                "expected_capabilities",
-                            ],
-                            "properties": {
-                                "action_id": {"type": "string"},
-                                "tool_id": {"type": "string"},
-                                "scan_id": {"type": "string"},
-                                "asset_id": {"type": "string"},
-                                "finding_id": {"type": "string"},
-                                "target": {"type": "string"},
-                                "reason": {"type": "string"},
-                                "expected_capabilities": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                },
-                            },
-                        },
-                        {"type": "null"},
-                    ]
-                },
-            },
-        },
-    },
-}
+# Ollama does not support json_schema/strict; use json_object and parse manually.
+AGENT_ACTION_RESPONSE_FORMAT: Dict[str, Any] = {"type": "json_object"}
 
 
 class PlannerCompletionClient(Protocol):

@@ -17,10 +17,10 @@ from app.models.finding import (
 class ValidationResult:
     """Result returned by a validation handler or manual-review decision."""
 
-    status: str
-    confidence: float
-    validator: str
-    method: str
+    status: str = "manual_review"
+    confidence: float = 0.0
+    validator: str = ""
+    method: str = ""
     evidence: Dict[str, Any] = field(default_factory=dict)
     evidence_refs: List[str] = field(default_factory=list)
     timestamp: str = field(
@@ -31,8 +31,10 @@ class ValidationResult:
     def __post_init__(self) -> None:
         self.status = ValidationStatus.normalize(self.status)
         self.confidence = validate_confidence(self.confidence)
-        _require_non_empty_string(self.validator, "validator")
-        _require_non_empty_string(self.method, "method")
+        if self.validator:
+            _require_non_empty_string(self.validator, "validator")
+        if self.method:
+            _require_non_empty_string(self.method, "method")
         _require_non_empty_string(self.timestamp, "timestamp")
 
         if not isinstance(self.evidence, dict):

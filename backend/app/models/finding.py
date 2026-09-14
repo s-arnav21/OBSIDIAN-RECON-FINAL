@@ -18,6 +18,7 @@ class ValidationStatus:
     LIKELY = "likely"
     MANUAL_REVIEW = "manual_review"
     CONFIRMED = "confirmed"
+    ERROR = "error"
 
     SUPPORTED = frozenset({
         REJECTED,
@@ -25,6 +26,7 @@ class ValidationStatus:
         LIKELY,
         MANUAL_REVIEW,
         CONFIRMED,
+        ERROR,
     })
     ALIASES = {
         "not_exploitable": REJECTED,
@@ -78,6 +80,7 @@ STATUS_WEIGHT: Dict[str, float] = {
     ValidationStatus.LIKELY: 0.5,
     ValidationStatus.MANUAL_REVIEW: 0.6,
     ValidationStatus.CONFIRMED: 1.0,
+    ValidationStatus.ERROR: 0.0,
 }
 
 

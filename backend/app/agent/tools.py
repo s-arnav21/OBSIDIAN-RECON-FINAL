@@ -27,6 +27,7 @@ class AgentToolDefinition:
     requires_any: Tuple[str, ...] = field(default_factory=tuple)
     provides: Tuple[str, ...] = field(default_factory=tuple)
     automatic_allowed: bool = True
+    allowed_options: Tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         for name in ("tool_id", "validator_id", "description"):
@@ -38,6 +39,7 @@ class AgentToolDefinition:
             "requires_all",
             "requires_any",
             "provides",
+            "allowed_options",
         ):
             values = tuple(getattr(self, name))
             if not all(isinstance(value, str) and value for value in values):
@@ -51,6 +53,17 @@ class AgentToolDefinition:
             raise ValueError("vulnerability_types cannot be empty")
         if type(self.automatic_allowed) is not bool:
             raise TypeError("automatic_allowed must be a boolean")
+        allowed = {
+            "endpoint",
+            "http_method",
+            "parameter_name",
+            "parameter_location",
+        }
+        unexpected = set(self.allowed_options) - allowed
+        if unexpected:
+            raise ValueError(
+                "unsupported allowed option(s): " + ", ".join(sorted(unexpected))
+            )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -62,6 +75,7 @@ class AgentToolDefinition:
             "requires_any": list(self.requires_any),
             "provides": list(self.provides),
             "automatic_allowed": self.automatic_allowed,
+            "allowed_options": list(self.allowed_options),
         }
 
 
@@ -73,6 +87,12 @@ DEFAULT_AGENT_TOOLS = (
         description="Run the bounded deterministic HTTP SQL injection validator.",
         requires_any=("discovered_services", "reachable_web_application"),
         provides=("application_compromise", "possible_database_access"),
+        allowed_options=(
+            "endpoint",
+            "http_method",
+            "parameter_name",
+            "parameter_location",
+        ),
     ),
     AgentToolDefinition(
         tool_id="validate-reflected-xss",
@@ -85,6 +105,12 @@ DEFAULT_AGENT_TOOLS = (
         ),
         description="Run the bounded deterministic reflected XSS validator.",
         requires_any=("discovered_services", "reachable_web_application"),
+        allowed_options=(
+            "endpoint",
+            "http_method",
+            "parameter_name",
+            "parameter_location",
+        ),
     ),
     AgentToolDefinition(
         tool_id="validate-ssrf",
@@ -92,6 +118,7 @@ DEFAULT_AGENT_TOOLS = (
         vulnerability_types=("server_side_request_forgery", "ssrf"),
         description="Run the controlled same-origin SSRF canary validator.",
         requires_any=("discovered_services", "reachable_web_application"),
+        allowed_options=("endpoint",),
     ),
     AgentToolDefinition(
         tool_id="validate-exposed-resource",
@@ -99,10 +126,21 @@ DEFAULT_AGENT_TOOLS = (
         vulnerability_types=(
             "information_disclosure",
             "sensitive_data_exposure",
+            "information-disclosure",
+            "reconnaissance",
+            "exposure",
+            "open-service-exposure",
+            "security_header",
+            "security-header",
+            "http_variant_diff",
+            "http-variant-diff",
+            "misconfiguration",
         ),
         description="Safely retrieve and classify one scanner-supplied resource.",
-        requires_any=("discovered_services", "reachable_web_application"),
+        requires_any=("discovered_services", "reachable_web_application",
+                      "adversary_reconnaissance_observed"),
         provides=("potential_information_exposure",),
+        allowed_options=("endpoint",),
     ),
     AgentToolDefinition(
         tool_id="validate-command-execution-simulation",
@@ -111,7 +149,7 @@ DEFAULT_AGENT_TOOLS = (
         description="Run the fixed controlled-lab command-execution simulation.",
         requires_any=("application_compromise",),
         provides=("command_execution",),
-        automatic_allowed=False,
+        automatic_allowed=True,  # enabled for authorized capstone targets
     ),
     AgentToolDefinition(
         tool_id="validate-system-information-discovery-simulation",
@@ -123,7 +161,7 @@ DEFAULT_AGENT_TOOLS = (
         ),
         requires_any=("command_execution",),
         provides=("system_information",),
-        automatic_allowed=False,
+        automatic_allowed=True,  # enabled for authorized capstone targets
     ),
 )
 

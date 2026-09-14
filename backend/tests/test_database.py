@@ -93,6 +93,9 @@ class PersistenceRepositoryTests(unittest.TestCase):
                 "attack_chains",
                 "attack_chain_steps",
                 "target_verifications",
+                "exploit_sessions",
+                "exploits",
+                "shells",
             },
         )
 
