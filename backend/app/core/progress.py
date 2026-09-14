@@ -229,11 +229,16 @@ _SCANNER_MANIFEST = [
     ("waf_detect", "waf detect"),
 ]
 
-# Skill-category → manifest position. The seed list (and therefore the live
-# journal) is ordered exactly like the runner executes: passive recon first,
-# then network protocol probes, then web, then exploit, then scanners, then
-# post/report analysis, then the finalize step.
-_SKILL_PHASE_ORDER = {"recon": 0, "network": 1, "web": 2, "exploit": 3}
+# Skill-category → manifest position (pre-scanner skills). The seed list (and
+# therefore the live journal) is ordered exactly like the runner executes:
+# passive recon first, then network protocol probes, then web — the scanners
+# are seeded right after these, then the post-scanner skill categories
+# (exploit → post → report), then the finalize step.
+_SKILL_PHASE_ORDER = {"recon": 0, "network": 1, "web": 2}
+
+# Skill-category → manifest position for the skills that run AFTER the
+# scanners (in the post-scanner skill pass).
+_POST_SCANNER_PHASE_ORDER = {"exploit": 0, "post": 1, "report": 2}
 
 
 def seed_manifest(job: ScanJob, include: list[str] | None = None,
@@ -250,9 +255,9 @@ def seed_manifest(job: ScanJob, include: list[str] | None = None,
     the exploit phase.
 
     Steps are seeded in the SAME order the pipeline executes them (recon →
-    recon skills → network → web → exploit → scanners → chain → finalize) so
-    the journal reads top-to-bottom in run order instead of alphabetical
-    manifest order.
+    recon skills → network → web → scanners → web reprobe → exploit → post →
+    report → chain → finalize) so the journal reads top-to-bottom in run order
+    instead of alphabetical manifest order.
     """
     include = set(include or [])
     skip = set(skip or [])
@@ -275,29 +280,29 @@ def seed_manifest(job: ScanJob, include: list[str] | None = None,
 
     from skills import load_all_skills, all_skills
     load_all_skills()
-    skills = sorted(
-        all_skills(),
+
+    def seed_skill(sk) -> None:
+        """Preseed one skill step, honouring the profile include/skip lists."""
+        cat = sk.category.value
+        job.preseed(f"skill:{sk.name}", sk.display_name or sk.name, phase=cat)
+        mark = job.steps_by_id.get(f"skill:{sk.name}")
+        if mark is None:
+            return
+        if skill_include and sk.name not in skill_include:
+            mark["status"] = SKIPPED
+            mark["reason"] = "excluded by profile"
+        elif sk.name in skill_skip:
+            mark["status"] = SKIPPED
+            mark["reason"] = "excluded by profile"
+
+    # Pre-scanner skills (recon → network → web) seed first because the
+    # pipeline runs them before the scanners.
+    pre_skills = sorted(
+        (s for s in all_skills() if s.category.value in ("recon", "network", "web")),
         key=lambda s: (_SKILL_PHASE_ORDER.get(s.category.value, 9), s.name),
     )
-    for sk in skills:
-        cat = sk.category.value
-        if cat == "exploit" and not allow_exploit:
-            continue
-        if skill_include and sk.name not in skill_include:
-            job.preseed(f"skill:{sk.name}", sk.display_name or sk.name, phase=cat)
-            mark = job.steps_by_id.get(f"skill:{sk.name}")
-            if mark:
-                mark["status"] = SKIPPED
-                mark["reason"] = "excluded by profile"
-            continue
-        if sk.name in skill_skip:
-            job.preseed(f"skill:{sk.name}", sk.display_name or sk.name, phase=cat)
-            mark = job.steps_by_id.get(f"skill:{sk.name}")
-            if mark:
-                mark["status"] = SKIPPED
-                mark["reason"] = "excluded by profile"
-            continue
-        job.preseed(f"skill:{sk.name}", sk.display_name or sk.name, phase=cat)
+    for sk in pre_skills:
+        seed_skill(sk)
 
     for name, label in _SCANNER_MANIFEST:
         if not wanted(name):
@@ -308,6 +313,18 @@ def seed_manifest(job: ScanJob, include: list[str] | None = None,
                 mark["reason"] = "excluded by request"
             continue
         job.preseed(f"scanner:{name}", label, phase="scanner")
+
+    # Post-scanner skills (exploit → post → report) seed after the scanners
+    # because the pipeline runs them once the scanners are done. The exploit
+    # phase only seeds when the profile/request enables it.
+    post_skills = sorted(
+        (s for s in all_skills() if s.category.value in ("exploit", "post", "report")),
+        key=lambda s: (_POST_SCANNER_PHASE_ORDER.get(s.category.value, 9), s.name),
+    )
+    for sk in post_skills:
+        if sk.category.value == "exploit" and not allow_exploit:
+            continue
+        seed_skill(sk)
 
     job.preseed("subdomain_chain", "subdomain chained deep-scan", phase="chain")
     job.preseed("origin_hunt", "origin hunt (behind WAF)", phase="chain")

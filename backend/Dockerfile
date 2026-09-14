@@ -33,7 +33,7 @@ RUN for entry in \
         && rm -f "/tmp/${1}.zip"; \
     done
 
-COPY requirements.txt .
+COPY backend/requirements.txt .
 RUN pip install --no-cache-dir --retries 8 --timeout 60 -r requirements.txt
 
 # Content-discovery wordlist (baked in at build time so first start never
@@ -43,7 +43,11 @@ RUN mkdir -p /root/.local/share/recon \
         "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt" \
         -o /root/.local/share/recon/common.txt
 
-COPY . .
+COPY backend/ .
+
+# Website assets live in the repo-root FRONTEND/ folder; bake them into the
+# image too so the container serves the UI even without the compose volume.
+COPY FRONTEND/ /app/frontend/
 
 # Auto-install the content wordlist + nuclei templates on first start.
 RUN chmod +x /app/docker-entrypoint.sh

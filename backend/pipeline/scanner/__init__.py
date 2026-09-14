@@ -197,6 +197,12 @@ def run_scanners(
     _raise_if_cancelled(cancel_event)
     _run_origin_hunt(report, target_url, progress, cancel_event)
 
+    # Phase 3-3 - report skills: run the deterministic report artifacts
+    # (remediation-plan, executive-summary, markdown-report) over the FULL
+    # finding set so they are triaged, normalized, and persisted with the scan.
+    _raise_if_cancelled(cancel_event)
+    _run_report_phase(report, target_url, progress, cancel_event, profile=profile)
+
     _emit(progress, "step_start", "finalize", "triage · validation · normalization", "chain")
     report.triage = triage(report.findings)
 
@@ -278,8 +284,8 @@ def _run_skill_phases(report: ScannersReport, target_url: str,
     """Run the deterministic skill phases and fold their findings into the report.
 
     Builds a SkillContext from the recon result, runs the recon → network →
-    web → (exploit) phases (post runs after scanners, see
-    _run_skill_pass_over_findings), then appends every skill finding to
+    web phases (exploit/post/report run later, see _run_skill_pass_over_findings
+    and _run_report_phase), then appends every skill finding to
     report.findings and records per-skill status.
 
     Returns the set of skill names that ran (so the post-scanner pass can
@@ -287,7 +293,6 @@ def _run_skill_phases(report: ScannersReport, target_url: str,
     """
     ran: set[str] = set()
     try:
-        from app.core.config import settings
         from skills.base import SkillContext
         from skills.runner import run_skills
 
@@ -297,21 +302,16 @@ def _run_skill_phases(report: ScannersReport, target_url: str,
             return
 
         phases: list[str] = ["recon", "network", "web"]
-        # Exploit phase gate: an explicit scan profile overrides the ambient
-        # settings toggle (vm/ctf profiles turn exploit on, webapp keeps it
-        # off regardless of what the process default is).
-        allow_exploit = settings.ALLOW_EXPLOIT_SKILLS
-        if profile is not None:
-            allow_exploit = profile.allow_exploit_skills
-        if allow_exploit:
-            phases.append("exploit")
-        # NOTE: the post phase is deliberately NOT wired here. It runs after
-        # the scanners (see _run_skill_pass_over_findings) so correlate/
-        # nuclei-targeted evaluate the FULL finding set rather than only the
-        # pre-scanner skill output.
+        # NOTE: the exploit phase is deliberately NOT wired here. It runs
+        # AFTER the scanners (see _run_skill_pass_over_findings) so the
+        # exploit probes consume the full recon + scanner information (ports,
+        # technologies, discovered paths, finding-derived gates). The post
+        # phase also runs there so correlate/nuclei-targeted evaluate the
+        # FULL finding set (including any exploit findings).
         # NOTE: the report phase is always excluded from the skill passes —
-        # report skills (executive-summary, remediation-plan, markdown-report)
-        # emit report artifacts, not target findings.
+        # report skills run once at the very end, after the subdomain chain
+        # and origin hunt (see _run_report_phase), over the complete finding
+        # set. They emit report artifacts, not target findings.
 
         for phase in phases:
             for result in run_skills(ctx, phase=phase, on_step=progress,
@@ -342,7 +342,7 @@ def _run_skill_pass_over_findings(report: ScannersReport, target_url: str,
                                   already_ran: set | None = None,
                                   progress=None, cancel_event=None,
                                   profile=None) -> None:
-    """Re-run a focused set of web + post skills over accumulated findings.
+    """Re-run a focused set of web + exploit + post skills over accumulated findings.
 
     The first skill pass runs before the scanners, so gated skills can only see
     what recon/root fingerprinting produced. This second pass builds a fresh
@@ -357,9 +357,10 @@ def _run_skill_pass_over_findings(report: ScannersReport, target_url: str,
     WordPress already fingerprinted). The post phase always runs once over the
     full finding set.
 
-    Only the web and post phases are re-evaluated here; recon/network already
-    ran, and exploit is deliberately excluded (no RCE probing on the second
-    sweep).
+    Only the web, exploit, and post phases are re-evaluated here; recon/network
+    already ran. The exploit phase runs AFTER the scanners so its probes
+    consume the full recon + scanner information, and post (correlate /
+    nuclei-targeted) evaluates everything including any exploit findings.
     """
     already_ran = already_ran or set()
     # Skills whose trigger can only become satisfiable once scanner content
@@ -371,6 +372,7 @@ def _run_skill_pass_over_findings(report: ScannersReport, target_url: str,
         "default-creds",
     }
     try:
+        from app.core.config import settings
         from skills.base import SkillContext
         from skills.runner import run_skills
 
@@ -400,6 +402,29 @@ def _run_skill_pass_over_findings(report: ScannersReport, target_url: str,
                     detail={"phase": f"{phase}-pass2",
                             "duration_ms": result.duration_ms,
                             "evidence_ids": result.evidence_ids}))
+        # Exploit phase runs AFTER the scanners here, so its probes fire on
+        # the full recon + scanner information (ports, technologies,
+        # discovered paths, finding-derived gates). The gate mirrors pass one:
+        # a scan profile that explicitly allows exploit skills wins; otherwise
+        # the ambient settings toggle decides.
+        allow_exploit = settings.ALLOW_EXPLOIT_SKILLS
+        if profile is not None:
+            allow_exploit = profile.allow_exploit_skills
+        if allow_exploit:
+            for result in run_skills(ctx, phase="exploit", on_step=progress,
+                                     cancel_event=cancel_event,
+                                     profile=profile):
+                report.findings.extend(result.findings)
+                _emit_findings(progress, result.findings,
+                               f"skill:{result.skill_name}")
+                report.statuses.append(ScannerStatus(
+                    name=f"skill:{result.skill_name}",
+                    status="ran" if result.success else "failed",
+                    findings_count=len(result.findings),
+                    error=result.error,
+                    detail={"phase": "exploit-pass2",
+                            "duration_ms": result.duration_ms,
+                            "evidence_ids": result.evidence_ids}))
         # Post phase runs ONCE here over the full finding set (skill findings +
         # scanner findings + any pass-2 web findings). The caller's profile
         # skip_skills (e.g. vm excludes nuclei-targeted) is respected.
@@ -421,6 +446,47 @@ def _run_skill_pass_over_findings(report: ScannersReport, target_url: str,
     except Exception as exc:  # noqa: BLE001 — skills never break the main scan
         report.statuses.append(ScannerStatus(
             name="skills-pass2", status="failed",
+            error=f"{type(exc).__name__}: {exc}"))
+
+
+def _run_report_phase(report: ScannersReport, target_url: str,
+                      progress=None, cancel_event=None, profile=None) -> None:
+    """Run the deterministic report skills over the complete finding set.
+
+    Report skills (remediation-plan, executive-summary, markdown-report) emit
+    report artifacts, not target findings. They run AFTER the subdomain chain
+    and origin hunt so the executive summary, remediation plan, and markdown
+    report capture the full scan surface; their findings flow through the same
+    triage/validation/normalization (and persistence) as everything else.
+    """
+    try:
+        from skills.base import SkillContext
+        from skills.runner import run_skills
+
+        ctx = _build_skill_context(target_url, None, report.evidence_store,
+                                   profile=profile)
+        if not ctx:
+            return
+        _enrich_context_from_report(ctx, report.findings)
+
+        for result in run_skills(ctx, phase="report", on_step=progress,
+                                 cancel_event=cancel_event, profile=profile):
+            report.findings.extend(result.findings)
+            _emit_findings(progress, result.findings,
+                           f"skill:{result.skill_name}")
+            report.statuses.append(ScannerStatus(
+                name=f"skill:{result.skill_name}",
+                status="ran" if result.success else "failed",
+                findings_count=len(result.findings),
+                error=result.error,
+                detail={"phase": "report",
+                        "duration_ms": result.duration_ms,
+                        "evidence_ids": result.evidence_ids}))
+    except ScanCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001 — skills never break the main scan
+        report.statuses.append(ScannerStatus(
+            name="skills-report", status="failed",
             error=f"{type(exc).__name__}: {exc}"))
 
 

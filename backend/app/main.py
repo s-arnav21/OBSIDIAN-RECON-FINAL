@@ -14,7 +14,19 @@ from app.api.scans import router as scans_router
 from app.api.target_verifications import router as target_verifications_router
 
 
-STATIC_DIR = Path(__file__).resolve().parent / "static"
+def _static_dir() -> Path:
+    # Website assets now live in the repo-root FRONTEND/ folder.
+    repo_frontend = Path(__file__).resolve().parents[2] / "FRONTEND"
+    if repo_frontend.is_dir():
+        return repo_frontend
+    # Container layout: FRONTEND/ is bind-mounted at /app/frontend.
+    container_frontend = Path(__file__).resolve().parents[1] / "frontend"
+    if container_frontend.is_dir():
+        return container_frontend
+    return Path(__file__).resolve().parent / "static"
+
+
+STATIC_DIR = _static_dir()
 
 app = FastAPI(title="Obsidian Recon API")
 app.include_router(readiness_router)

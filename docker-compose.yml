@@ -16,13 +16,16 @@ services:
       - "6379:6379"
 
   backend:
-    build: ./backend
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
     ports:
       - "8000:8000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./backend:/app
+      - ./FRONTEND:/app/frontend
     env_file:
       - .env
     depends_on:
@@ -36,42 +39,6 @@ services:
     depends_on:
       - postgres
 
-  demo-target:
-    build: ./backend
-    command:
-      - uvicorn
-      - tests.integration_apps.vulnerable_web_app:app
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8090"
-      - --no-access-log
-      - --lifespan
-      - "off"
-    ports:
-      - "127.0.0.1:8090:8090"
-    environment:
-      PYTHONDONTWRITEBYTECODE: "1"
-    read_only: true
-    tmpfs:
-      - /tmp
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - >-
-          import sys, urllib.request;
-          response = urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=2);
-          sys.exit(0 if response.status == 200 else 1)
-      interval: 3s
-      timeout: 3s
-      retries: 10
-      start_period: 5s
-
 volumes:
   postgres_data:
+    name: obsidian-recon_postgres_data
