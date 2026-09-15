@@ -12,6 +12,8 @@ from app.agent.models import AgentAction, AgentObservation, AgentState
 from app.agent.orchestrator import AgentOrchestrator, Planner
 from app.agent.policy import AgentPolicyGate, PolicyDecision
 from app.agent.tools import AgentToolRegistry
+from app.models.finding import Finding
+from app.models.validation import ValidationResult
 
 
 @dataclass(frozen=True)
@@ -22,6 +24,8 @@ class AgentRunStep:
     proposed_action: AgentAction
     policy_decision: PolicyDecision
     observation: AgentObservation
+    validation_result: Optional[ValidationResult] = None
+    updated_finding: Optional[Finding] = None
 
     def __post_init__(self) -> None:
         if isinstance(self.step_number, bool) or not isinstance(
@@ -37,6 +41,18 @@ class AgentRunStep:
             raise TypeError("policy_decision must be a PolicyDecision")
         if not isinstance(self.observation, AgentObservation):
             raise TypeError("observation must be an AgentObservation")
+        if self.validation_result is not None and not isinstance(
+            self.validation_result,
+            ValidationResult,
+        ):
+            raise TypeError(
+                "validation_result must be a ValidationResult or None"
+            )
+        if self.updated_finding is not None and not isinstance(
+            self.updated_finding,
+            Finding,
+        ):
+            raise TypeError("updated_finding must be a Finding or None")
         action = self.proposed_action
         policy = self.policy_decision
         observation = self.observation
@@ -201,6 +217,8 @@ class AgentRunService:
                 proposed_action=action,
                 policy_decision=execution.policy,
                 observation=execution.observation,
+                validation_result=execution.validation_result,
+                updated_finding=execution.updated_finding,
             )
             for index, (action, execution) in enumerate(
                 zip(

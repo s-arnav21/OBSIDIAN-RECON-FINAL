@@ -25,7 +25,7 @@ from app.db.models import (
     ValidationORM,
 )
 from app.models.attack_chain import AttackChain
-from app.models.finding import Finding
+from app.models.finding import Finding, ValidationStatus
 from app.models.validation import ValidationResult
 
 
@@ -312,6 +312,23 @@ class PersistenceRepository:
             evidence_json=evidence_json,
         )
         self.session.add(record)
+        self.session.flush()
+        return record
+
+    def update_finding_validation_status(
+        self,
+        finding_id: str,
+        status: str,
+    ) -> FindingORM:
+        """Persist a new validation status onto an existing finding record."""
+        record = self.session.get(FindingORM, finding_id)
+        if record is None:
+            raise PersistenceNotFoundError(
+                f"finding {finding_id!r} was not found"
+            )
+        if isinstance(status, str) and not status.strip():
+            raise ValueError("status must be a non-empty string")
+        record.status = ValidationStatus.normalize(status)
         self.session.flush()
         return record
 

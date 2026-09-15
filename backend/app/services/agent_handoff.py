@@ -18,7 +18,6 @@ deterministic planner; the automatic agent step is simply skipped.
 """
 from __future__ import annotations
 
-import json
 import logging
 import uuid
 from typing import Any, Dict, Optional
@@ -37,6 +36,7 @@ from app.agent.tools import AgentToolRegistry
 from app.db.repository import PersistenceRepository
 from app.db.serialization import finding_orm_to_model
 from app.models.finding import ValidationStatus
+from app.services.agent_persistence import persist_agent_run_results
 
 logger = logging.getLogger(__name__)
 
@@ -231,17 +231,17 @@ def auto_handoff_completed_scan(
             "error": str(exc) or exc.__class__.__name__,
         }
 
-    _persist_agent_results(
+    persist_summary = persist_agent_run_results(
         session,
-        session_id=session_id,
+        scan_id=scan_id,
         result=result,
+        session_id=session_id,
+        session_name=handoff_session_name(scan_id),
+        target_url=scan.target_url,
     )
-    final_status = "completed" if result.status == "done" else "failed"
-    repository.update_exploit_session_status(session_id, final_status)
-    session.commit()
 
     return {
-        "status": "completed" if result.status == "done" else "failed",
+        "status": persist_summary["status"],
         "reason": "agent_run",
         "scan_id": scan_id,
         "session_id": session_id,
@@ -251,52 +251,8 @@ def auto_handoff_completed_scan(
         "steps_used": result.steps_used,
         "final_capabilities": list(result.final_state.capabilities),
         "mitre_techniques": list(result.final_state.mitre_techniques),
+        "persisted": persist_summary,
     }
-
-
-def _persist_agent_results(
-    session: Session,
-    *,
-    session_id: str,
-    result: "AgentRunResult",
-) -> None:
-    """Persist each agent step as an auditable exploit record (mirrors /api/agent)."""
-    repository = PersistenceRepository(session)
-
-    for step in result.steps:
-        observation = step.observation
-        action = step.proposed_action
-        finding_id = action.finding_id or ""
-        output_data = {
-            "step_number": step.step_number,
-            "tool_id": action.tool_id,
-            "finding_id": action.finding_id,
-            "reason": action.reason,
-            "execution_status": observation.execution_status,
-            "summary": observation.summary,
-            "validation_status": observation.validation_status,
-            "error_category": observation.error_category,
-            "policy_code": step.policy_decision.code,
-            "policy_reason": step.policy_decision.reason,
-        }
-        outcome = (
-            "success"
-            if observation.execution_status == "completed"
-            else "failed" if observation.execution_status == "failed" else "inconclusive"
-        )
-        repository.persist_exploit(
-            exploit_id=f"agent-exp-{uuid.uuid4()}",
-            session_id=session_id,
-            finding_id=finding_id if finding_id else None,
-            technique_id=None,
-            module_name=f"agent:{action.tool_id}",
-            description=(
-                f"Agent step {step.step_number}: {action.tool_id} "
-                f"via {action.tool_id} - {outcome}"
-            ),
-            outcome=outcome,
-            output=json.dumps(output_data, default=str)[:250000],
-        )
 
 
 __all__ = ["auto_handoff_completed_scan", "handoff_session_name"]

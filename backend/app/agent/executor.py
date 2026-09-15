@@ -6,6 +6,9 @@ from dataclasses import dataclass, replace
 from numbers import Real
 from typing import Any, Optional
 
+import requests
+from sqlalchemy.orm import Session as OrmSession
+
 from app.agent.models import (
     AgentAction,
     AgentExecutionStatus,
@@ -124,6 +127,21 @@ def _first_number(
     return None
 
 
+def _resolve_agent_http_session(session: Any) -> Any:
+    """Return an HTTP-capable session for deterministic validators.
+
+    Callers thread an opaque ``session`` object through the executor. The live
+    API passes the SQLAlchemy DB session, but validators require an HTTP
+    ``requests``-style session (``get``/``request``) to produce evidence. Pass
+    the object through when usable and substitute a fresh HTTP session for a
+    database session so validators actually run instead of degrading to
+    manual review.
+    """
+    if session is None or isinstance(session, OrmSession):
+        return requests.Session()
+    return session
+
+
 def _observable_evidence(
     result: ValidationResult,
 ) -> tuple[Optional[str], tuple[str, ...], Optional[int], Optional[int], bool]:
@@ -221,7 +239,9 @@ class AgentToolExecutor:
             return self._from_tool_result(result, action, policy)
 
         try:
-            validation = dispatch(finding, session=session)
+            validation = dispatch(
+                finding, session=_resolve_agent_http_session(session)
+            )
             updated = enrich_finding_model(
                 apply_validation_result(finding, validation)
             )

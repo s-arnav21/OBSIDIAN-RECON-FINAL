@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import uuid
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -16,13 +13,12 @@ from app.agent.llm_planner import LLMPlanner
 from app.agent.models import AgentState, ABSOLUTE_MAX_AGENT_STEPS
 from app.agent.run_service import AgentRunService
 from app.agent.tools import AgentToolRegistry
-from app.db.models import EvidenceORM, ExploitORM, ExploitSessionORM, ValidationORM
 from app.db.session import get_db
 from app.db.repository import PersistenceRepository
 from app.db.serialization import finding_orm_to_model
 from app.models.finding import ValidationStatus
 from app.scanning.scope import normalize_origin
-from uuid import uuid4
+from app.services.agent_persistence import persist_agent_run_results
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 
@@ -172,91 +168,17 @@ def run_agent(
             detail=f"agent run failed: {exc}",
         )
 
-    # Persist agent run results to the database
-    try:
-        _persist_agent_results(session, request.scan_id, request.asset_id, result)
-    except Exception as exc:
-        # Log but don't fail the request - results are still returned
-        import logging
-        logging.getLogger(__name__).warning(
-            "Failed to persist agent results: %s", exc,
-        )
+    # Persist agent run results to the database.
+    persist_summary = persist_agent_run_results(
+        session,
+        scan_id=request.scan_id,
+        result=result,
+        target_url=scan_target,
+    )
 
-    return result.to_dict()
-
-
-def _persist_agent_results(
-    session: Session,
-    scan_id: str,
-    asset_id: str,
-    result: "AgentRunResult",
-) -> None:
-    """Persist agent run results: exploit attempts and validation evidence."""
-    from app.agent.run_service import AgentRunResult
-
-    repository = PersistenceRepository(session)
-
-    # Find or create an exploit session for the agent run
-    agent_session_name = f"agent-run-{scan_id[:16]}"
-    existing_sessions = repository.list_exploit_sessions(scan_id=scan_id)
-    agent_session = None
-    for s in existing_sessions:
-        if s.session_name == agent_session_name:
-            agent_session = s
-            break
-
-    if agent_session is None:
-        agent_session_record = repository.create_exploit_session(
-            session_id=f"agent-{uuid4()}",
-            scan_id=scan_id,
-            target_url="",
-            session_name=agent_session_name,
-            tool_used="agent-llm-loop",
-            status="running",
-        )
-        agent_session = agent_session_record
-
-    # Persist each step's outcome as an exploit record
-    for step in result.steps:
-        observation = step.observation
-        action = step.proposed_action
-        finding_id = action.finding_id or ""
-
-        output_data = {
-            "step_number": step.step_number,
-            "tool_id": action.tool_id,
-            "finding_id": action.finding_id,
-            "reason": action.reason,
-            "execution_status": observation.execution_status,
-            "summary": observation.summary,
-            "validation_status": observation.validation_status,
-            "error_category": observation.error_category,
-            "policy_code": step.policy_decision.code,
-            "policy_reason": step.policy_decision.reason,
-        }
-
-        outcome = "success" if observation.execution_status == "completed" else (
-            "failed" if observation.execution_status == "failed" else "inconclusive"
-        )
-
-        repository.persist_exploit(
-            exploit_id=f"agent-exp-{uuid4()}",
-            session_id=agent_session.id,
-            finding_id=finding_id if finding_id else None,
-            technique_id=None,
-            module_name=f"agent:{action.tool_id}",
-            description=(
-                f"Agent step {step.step_number}: {action.tool_id} "
-                f"via {action.tool_id} - {outcome}"
-            ),
-            outcome=outcome,
-            output=json.dumps(output_data, default=str)[:250000],
-        )
-
-    # Update session status
-    final_status = "completed" if result.status == "done" else "failed"
-    repository.update_exploit_session_status(agent_session.id, final_status)
-    session.commit()
+    response = result.to_dict()
+    response["persisted"] = persist_summary
+    return response
 
 
 @router.get("/tools")
