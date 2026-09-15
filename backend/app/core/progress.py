@@ -23,6 +23,7 @@ class ScanJob:
         self.status = "running"
         self.error: str | None = None
         self.result: dict | None = None
+        self.handoff: dict | None = None
         self.steps: list[dict] = []
         self.steps_by_id: dict[str, dict] = {}
         self.findings: list[dict] = []
@@ -103,6 +104,11 @@ class ScanJob:
                     continue
                 self.findings.append(row)
 
+    def set_handoff(self, report: dict | None) -> None:
+        """Journal the recon→exploit automatic handoff state for the UI."""
+        with self._lock:
+            self.handoff = report
+
     def set_result(self, result: dict | None, error: str | None = None) -> None:
         with self._lock:
             self.result = result
@@ -172,6 +178,7 @@ class ScanJob:
                 "total": total,
                 "findings": list(self.findings),
                 "findings_count": len(self.findings),
+                "handoff": self.handoff,
                 "elapsed_ms": int((time.time() - self.created_at) * 1000),
                 "finished_at": self.finished_at,
             }

@@ -46,6 +46,7 @@ class FullScanJobRequest(BaseModel):
     skip: Optional[list[str]] = None
     timeout: Optional[int] = None
     ports: Optional[str] = None
+    auto_handoff: bool = False
 
 
 def _scope_target(url: str):
@@ -101,11 +102,13 @@ def create_full_scan_job(request: FullScanJobRequest) -> dict:
     seed_manifest(job, include=request.include, skip=request.skip,
                   allow_exploit=allow_exploit, profile=profile)
 
-    _spawn_worker(job, target_url=target_url, request=request, profile=profile)
+    _spawn_worker(job, target_url=target_url, request=request, profile=profile,
+                  auto_handoff=request.auto_handoff, allow_exploit=allow_exploit)
     return job.snapshot()
 
 
-def _spawn_worker(job, *, target_url: str, request: FullScanJobRequest, profile) -> None:
+def _spawn_worker(job, *, target_url: str, request: FullScanJobRequest, profile,
+                  auto_handoff: bool = False, allow_exploit: bool = False) -> None:
     def worker() -> None:
         session = None
         try:
@@ -127,6 +130,12 @@ def _spawn_worker(job, *, target_url: str, request: FullScanJobRequest, profile)
                 session=session,
             )
             job.set_result(result.to_dict())
+
+            # Auto handoff runs in the same worker thread/session after the
+            # scan result is journaled, so the operator never has to open
+            # /exploit, create a session, and start the agent by hand.
+            if auto_handoff and allow_exploit:
+                _run_auto_handoff(session, job, result)
         except Exception as exc:  # noqa: BLE001
             from pipeline._errors import ScanCancelled
 
@@ -144,6 +153,37 @@ def _spawn_worker(job, *, target_url: str, request: FullScanJobRequest, profile)
 
     thread = threading.Thread(target=worker, name=f"full-scan-{job.id}", daemon=True)
     thread.start()
+
+
+def _run_auto_handoff(session, job, result) -> None:
+    """Journal and run the recon→exploit automatic handoff for a finished scan."""
+    scan_id = getattr(result, "scan_id", None)
+    if not scan_id:
+        return
+    job.set_handoff({
+        "status": "running",
+        "scan_id": scan_id,
+        "session_id": None,
+        "message": "creating exploit session and starting the LLM agent…",
+    })
+    try:
+        from app.services.agent_handoff import auto_handoff_completed_scan
+
+        report = auto_handoff_completed_scan(
+            session,
+            scan_id=scan_id,
+            authorized=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("auto handoff failed for scan %s", scan_id)
+        report = {
+            "status": "error",
+            "scan_id": scan_id,
+            "session_id": None,
+            "error": str(exc) or exc.__class__.__name__,
+            "message": "automatic handoff failed",
+        }
+    job.set_handoff(report)
 
 
 @router.get("/jobs")

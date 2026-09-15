@@ -7,6 +7,8 @@ let renderedFindings = 0;
 let liveSev = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
 let livePinned = true;
 let scanName = null;
+let pollHandoffTimer = null;
+let handoffJobId = null;
 
 /* ---------- formatting ---------- */
 function fmtDur(ms) {
@@ -207,6 +209,11 @@ function resetForScan() {
   $('sevBar').innerHTML = '';
   $('triageNote').textContent = '';
   $('toExploitCard').hidden = true;
+  const hc = $('handoffCard');
+  if (hc) hc.hidden = true;
+  handoffJobId = null;
+  if (pollHandoffTimer) { clearTimeout(pollHandoffTimer); pollHandoffTimer = null; }
+  if (window.__handoffTimer) { clearTimeout(window.__handoffTimer); window.__handoffTimer = null; }
 }
 
 /* ---------- progress bar ---------- */
@@ -366,6 +373,7 @@ function scanPayload() {
     target_url: url,
     authorized: $('authCheck').checked,
     name: scanName,
+    auto_handoff: $('autoHandoffCheck') ? $('autoHandoffCheck').checked : false,
   };
 }
 
@@ -486,7 +494,7 @@ function finalizeJob(job) {
   setDot('ok');
   setProgress(100, 100, 'done');
   statusLine('scan complete');
-  renderResults(job.result || {}, elapsed);
+  renderResults(job.result || {}, elapsed, job.handoff || null, job.id);
   setTimeout(() => setDot('idle'), 4000);
 }
 
@@ -508,7 +516,15 @@ async function cancelScan() {
 }
 
 /* ---------- completed results ---------- */
-function renderResults(data, elapsedMs) {
+function storeScanSession(data) {
+  sessionStorage.setItem('obsidian_scan', JSON.stringify({
+    scan_id: data.scan_id,
+    scan_name: scanName || data.scan_id,
+    target_url: data.target_url || '',
+  }));
+}
+
+function renderResults(data, elapsedMs, handoff, jobId) {
   const findings = data.findings || [];
   const eligible = findings.filter((f) => ['confirmed', 'manual_review'].includes(f.validation_status));
 
@@ -539,13 +555,81 @@ function renderResults(data, elapsedMs) {
       : 'Open the exploit console to analyze the full recon picture';
   }
   $('toExploitBtn').addEventListener('click', () => {
-    sessionStorage.setItem('obsidian_scan', JSON.stringify({
-      scan_id: data.scan_id,
-      scan_name: scanName || data.scan_id,
-      target_url: data.target_url || '',
-    }));
+    storeScanSession(data);
     window.location.href = '/exploit';
   });
+
+  renderHandoff(data, handoff, jobId);
+}
+
+/* ---------- automatic recon → exploit handoff ---------- */
+function renderHandoff(data, handoff, jobId) {
+  const card = $('handoffCard');
+  if (!card) return;
+  if (!handoff || !handoff.status || !data.scan_id) {
+    card.hidden = true;
+    return;
+  }
+  card.hidden = false;
+  if (window.__handoffTimer) { clearTimeout(window.__handoffTimer); window.__handoffTimer = null; }
+
+  const title = $('handoffTitle');
+  const copy = $('handoffCopy');
+  const btn = $('handoffBtn');
+
+  btn.href = '/exploit';
+  storeScanSession(data);
+
+  if (handoff.status === 'running') {
+    title.textContent = 'Automatic handoff in progress…';
+    copy.textContent = 'Creating the attack session and starting the LLM agent on eligible findings. This can take several minutes.';
+    btn.textContent = 'Open exploit console now →';
+    // The scan result is in, but the handoff thread keeps running — keep
+    // polling the job until it reaches a terminal handoff state.
+    handoffJobId = jobId || handoffJobId;
+    if (handoffJobId) {
+      if (pollHandoffTimer) clearTimeout(pollHandoffTimer);
+      pollHandoffTimer = setTimeout(pollHandoffAfterScan, 2000);
+    }
+    return;
+  }
+
+  if (handoff.status === 'completed') {
+    title.textContent = 'Automatic handoff complete';
+    copy.textContent = 'Attack session ready — LLM agent finished (' + (handoff.agent_status || 'done') + ', ' + (handoff.steps_used || 0) + ' steps). Redirecting to the exploit console…';
+    btn.textContent = 'Open attack session →';
+    window.__handoffTimer = setTimeout(() => { window.location.href = '/exploit'; }, 1800);
+    return;
+  }
+
+  if (handoff.status === 'skipped') {
+    title.textContent = 'Automatic handoff skipped';
+    copy.textContent = handoff.reason || handoff.message || 'No automatic handoff was performed.';
+    btn.textContent = 'Open exploit console →';
+    return;
+  }
+
+  title.textContent = 'Automatic handoff failed';
+  copy.textContent = handoff.error || handoff.message || 'The automatic handoff errored.';
+  btn.textContent = 'Open exploit console →';
+}
+
+async function pollHandoffAfterScan() {
+  if (!handoffJobId) return;
+  try {
+    const job = await postJSON('/api/scans/jobs/' + handoffJobId, null, 'GET');
+    const h = job && job.handoff;
+    if (h && h.status && h.status !== 'running') {
+      renderHandoff(job.result || {}, h, handoffJobId);
+      return;
+    }
+    // Still running — update the card and try again shortly.
+    const copy = $('handoffCopy');
+    if (copy) copy.textContent = 'Still running — the LLM agent is executing validated steps. Check back shortly.';
+    pollHandoffTimer = setTimeout(pollHandoffAfterScan, 3000);
+  } catch (_) {
+    // Job may have been pruned; leave the card in its in-progress state.
+  }
 }
 
 function renderSevBar(findings) {

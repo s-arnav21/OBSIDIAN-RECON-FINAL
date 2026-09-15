@@ -26,6 +26,7 @@
       <label for="scanNameInput">Scan Name <span class="required">*</span></label>
       <input type="text" id="scanNameInput" placeholder="e.g. metasploitable full vuln audit" autocomplete="off" required>
       <label class="check"><input type="checkbox" id="authCheck" checked> I confirm this target is authorized</label>
+      <label class="check" title="When the scan completes, an attack session is created and the LLM agent auto-runs against confirmed findings."><input type="checkbox" id="autoHandoffCheck" checked> Auto-handoff to exploit phase (create attack session + run LLM agent)</label>
       <div class="btn-row">
         <button id="runBtn" class="btn primary">Start Scan</button>
         <button id="stopBtn" class="btn danger" disabled hidden>Stop Scan</button>
@@ -69,6 +70,12 @@
     </div>
 
     <div id="resultView" class="view-fade" hidden>
+      <div id="handoffCard" class="cta cta-handoff" hidden>
+        <p><strong id="handoffTitle">Automatic handoff in progress&hellip;</strong>
+          <span class="mono confirm-copy" id="handoffCopy"></span></p>
+        <a id="handoffBtn" class="btn primary" href="/exploit">Open attack session &rarr;</a>
+      </div>
+
       <div id="toExploitCard" class="cta" hidden>
         <p><strong>Findings ready for exploitation.</strong>
           <span class="mono confirm-copy">eligible targets are passed forward to phase 2</span></p>
