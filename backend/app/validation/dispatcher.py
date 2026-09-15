@@ -12,16 +12,24 @@ from typing import Any, Callable, Dict, Optional
 
 from app.models.finding import Finding, STATUS_WEIGHT, ValidationStatus
 from app.models.validation import ValidationResult
+from app.validation.auth_bypass import validate_generic_http_auth_bypass
 from app.validation.command_execution import (
     validate_generic_http_command_execution,
 )
+from app.validation.deserialization import validate_generic_http_deserialization
 from app.validation.exposure import validate_generic_exposed_resource
+from app.validation.file_upload import validate_generic_http_file_upload
+from app.validation.idor import validate_generic_http_idor
+from app.validation.lfi import validate_generic_http_lfi
+from app.validation.session_security import validate_generic_http_session_fixation
+from app.validation.ssti import validate_generic_http_ssti
 from app.validation.sql_injection import validate_generic_http_sqli
 from app.validation.ssrf import validate_generic_http_ssrf
 from app.validation.system_information import (
     validate_controlled_system_information_discovery,
 )
 from app.validation.xss import validate_generic_reflected_xss
+from app.validation.xxe import validate_generic_http_xxe
 
 
 ValidationHandler = Callable[[Finding, Any], ValidationResult]
@@ -50,6 +58,14 @@ register("generic-http-command-execution")(
 register("controlled-http-system-information-discovery")(
     validate_controlled_system_information_discovery
 )
+register("generic-http-lfi")(validate_generic_http_lfi)
+register("generic-http-xxe")(validate_generic_http_xxe)
+register("generic-http-idor")(validate_generic_http_idor)
+register("generic-http-ssti")(validate_generic_http_ssti)
+register("generic-http-file-upload")(validate_generic_http_file_upload)
+register("generic-http-auth-bypass")(validate_generic_http_auth_bypass)
+register("generic-http-deserialization")(validate_generic_http_deserialization)
+register("generic-http-session-fixation")(validate_generic_http_session_fixation)
 
 
 # Lab-specific handler retained without expanding its validation behavior.

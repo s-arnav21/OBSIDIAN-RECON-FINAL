@@ -180,7 +180,12 @@ class AgentPolicyGate:
         compatible_type = normalize_vulnerability_type(
             finding.vulnerability_type
         ) in tool.vulnerability_types
-        if effective_validator != tool.validator_id or not compatible_type:
+        if tool.validator_id is None:
+            # Real external tool: only the vulnerability type must match.
+            validator_match = True
+        else:
+            validator_match = effective_validator == tool.validator_id
+        if not validator_match or not compatible_type:
             return _decision(
                 action,
                 allowed=False,

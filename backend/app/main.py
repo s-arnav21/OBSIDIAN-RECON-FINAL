@@ -11,6 +11,7 @@ from app.api.jobs import router as jobs_router
 from app.api.readiness import router as readiness_router
 from app.api.recon import router as recon_router
 from app.api.scans import router as scans_router
+from app.api.security import router as security_router
 from app.api.target_verifications import router as target_verifications_router
 
 
@@ -37,6 +38,7 @@ app.include_router(target_verifications_router)
 app.include_router(exploit_router)
 app.include_router(agent_router)
 app.include_router(attacks_router)
+app.include_router(security_router)
 app.mount("/static", StaticFiles(directory=STATIC_DIR, html=True), name="static")
 app.mount("/console", StaticFiles(directory=STATIC_DIR, html=True), name="console")
 

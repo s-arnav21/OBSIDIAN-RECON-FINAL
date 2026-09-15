@@ -13,7 +13,7 @@ from app.agent.models import (
     AgentState,
     AgentStatus,
 )
-from app.agent.tools import AgentToolRegistry
+from app.agent.tools import AgentToolRegistry, get_available_tool_catalog
 
 
 @runtime_checkable
@@ -105,7 +105,7 @@ class AgentOrchestrator:
             try:
                 proposal = self.planner.propose_action(
                     state.to_dict(),
-                    self.registry.planner_catalog(),
+                    get_available_tool_catalog(),
                 )
             except Exception:
                 return replace(

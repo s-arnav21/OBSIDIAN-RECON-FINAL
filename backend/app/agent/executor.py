@@ -1,4 +1,4 @@
-"""Policy-enforced adapter from agent tools to canonical validators."""
+"""Policy-enforced adapter from agent actions to registered tools and validators."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from app.agent.models import (
     AgentState,
 )
 from app.agent.policy import AgentPolicyGate, PolicyDecision
-from app.agent.tools import AgentToolRegistry
+from app.agent.tools import ToolResult, execute_tool
 from app.attack_chain.mitre_mapping import enrich_finding_model
 from app.models.finding import Finding, ValidationStatus
 from app.models.validation import ValidationResult
@@ -61,6 +61,43 @@ def _validation_decision(result: ValidationResult) -> Optional[str]:
         if decision is not None:
             return decision
     return _bounded_string(result.error)
+
+
+def _map_options_for_tool(
+    action: AgentAction,
+    finding: Finding,
+) -> Dict[str, Any]:
+    """Translate AgentAction.options + finding context into tool-native options.
+
+    AgentAction.options use validator-style keys (endpoint, http_method,
+    parameter_name, parameter_location). Real tool executors expect
+    tool-native keys (target, method, parameter, data, etc.).  This bridge
+    resolves the difference so every tool receives the keys it needs.
+    """
+    opts: Dict[str, Any] = {}
+    options_map = dict(action.options)
+
+    # --- Resolve the full target URL ---
+    endpoint = options_map.get("endpoint") or finding.endpoint or ""
+    if endpoint and not endpoint.startswith(("http://", "https://")):
+        target_base = action.target or finding.target or ""
+        endpoint = target_base.rstrip("/") + "/" + endpoint.lstrip("/")
+    opts["target"] = endpoint or (action.target or finding.target or "")
+
+    # --- HTTP method ---
+    method = options_map.get("http_method") or finding.http_method or "GET"
+    opts["method"] = method.upper()
+
+    # --- Parameter ---
+    parameter = options_map.get("parameter_name") or finding.parameter_name or ""
+    if parameter:
+        opts["parameter"] = parameter
+
+    parameter_location = options_map.get("parameter_location") or getattr(finding, "parameter_location", None) or ""
+    if parameter_location:
+        opts["parameter_location"] = parameter_location
+
+    return opts
 
 
 def _detection_methods(result: ValidationResult) -> tuple[str, ...]:
@@ -121,19 +158,15 @@ def _observable_evidence(
 
 
 class AgentToolExecutor:
-    """Always applies policy before invoking an existing dispatcher handler."""
+    """Apply policy, then dispatch to a registered tool or canonical validator."""
 
     def __init__(
         self,
-        registry: AgentToolRegistry,
-        policy_gate: AgentPolicyGate,
+        registry: Any = None,
+        policy_gate: Optional[AgentPolicyGate] = None,
     ) -> None:
-        if not isinstance(registry, AgentToolRegistry):
-            raise TypeError("registry must be an AgentToolRegistry")
         if not isinstance(policy_gate, AgentPolicyGate):
             raise TypeError("policy_gate must be an AgentPolicyGate")
-        if policy_gate.registry is not registry:
-            raise ValueError("executor registry and policy registry must match")
         self.registry = registry
         self.policy_gate = policy_gate
 
@@ -165,6 +198,28 @@ class AgentToolExecutor:
         if original is None:  # Defensive; policy already checks this.
             raise RuntimeError("policy allowed an unavailable finding")
         finding = _finding_with_options(original, action.options)
+        tool_options = _map_options_for_tool(action, original)
+        try:
+            result = execute_tool(action.tool_id, tool_options)
+        except Exception:
+            return AgentExecution(
+                policy=policy,
+                observation=AgentObservation(
+                    action_id=action.action_id,
+                    tool_id=action.tool_id,
+                    finding_id=action.finding_id,
+                    policy_decision=policy.code,
+                    policy_allowed=True,
+                    execution_status=AgentExecutionStatus.FAILED,
+                    summary="The selected tool could not be executed safely.",
+                    error_category="tool_execution_error",
+                    options_used=action.options,
+                ),
+            )
+
+        if not result.extra.get("use_validator"):
+            return self._from_tool_result(result, action, policy)
+
         try:
             validation = dispatch(finding, session=session)
             updated = enrich_finding_model(
@@ -226,6 +281,40 @@ class AgentToolExecutor:
                 observed_http_status=http_status,
                 observed_response_length=response_length,
                 waf_or_filter_interference=waf_interference,
+                options_used=action.options,
+            ),
+        )
+
+    def _from_tool_result(
+        self,
+        result: ToolResult,
+        action: AgentAction,
+        policy: PolicyDecision,
+    ) -> AgentExecution:
+        """Translate a non-validator tool result into a bounded observation."""
+        success = bool(result.success)
+        summary = _bounded_string(result.error if not success else result.output)
+        if summary is None:
+            summary = (
+                "The tool reported success without output."
+                if success
+                else "The tool failed without a precise reason."
+            )
+        return AgentExecution(
+            policy=policy,
+            observation=AgentObservation(
+                action_id=action.action_id,
+                tool_id=action.tool_id,
+                finding_id=action.finding_id,
+                policy_decision=policy.code,
+                policy_allowed=True,
+                execution_status=(
+                    AgentExecutionStatus.COMPLETED
+                    if success
+                    else AgentExecutionStatus.FAILED
+                ),
+                summary=summary,
+                error_category=None if success else "tool_reported_error",
                 options_used=action.options,
             ),
         )

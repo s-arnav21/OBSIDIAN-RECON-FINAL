@@ -7,6 +7,7 @@ from typing import Any, Dict, Mapping, Optional, Protocol, Sequence
 
 from app.agent.llm_client import LLMClientError
 from app.agent.models import AgentAction
+from app.agent.tools import get_available_tool_catalog
 
 
 MAX_PLANNER_PROMPT_BYTES = 128 * 1024
@@ -81,8 +82,12 @@ _OBSERVATION_FIELDS = (
 _TOOL_FIELDS = (
     "tool_id",
     "validator_id",
-    "vulnerability_types",
+    "name",
     "description",
+    "category",
+    "available",
+    "vulnerability_types",
+    "vuln_types",
     "requires_all",
     "requires_any",
     "provides",
@@ -292,8 +297,10 @@ class LLMPlanner:
     def propose_action(
         self,
         state: Dict[str, Any],
-        available_tools: Sequence[Dict[str, Any]],
+        available_tools: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> Optional[AgentAction]:
+        if available_tools is None:
+            available_tools = get_available_tool_catalog()
         safe_state, safe_tools = _sanitized_context(state, available_tools)
         try:
             user_payload = json.dumps(
