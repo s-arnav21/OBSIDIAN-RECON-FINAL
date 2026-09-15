@@ -60,6 +60,71 @@ EXPOSURE_TYPE_MAP = {
     "information_disclosure": "information_disclosure",
 }
 
+GENERIC_LFI_VALIDATOR_ID = "generic-http-lfi"
+GENERIC_XXE_VALIDATOR_ID = "generic-http-xxe"
+GENERIC_IDOR_VALIDATOR_ID = "generic-http-idor"
+GENERIC_SSTI_VALIDATOR_ID = "generic-http-ssti"
+GENERIC_AUTH_BYPASS_VALIDATOR_ID = "generic-http-auth-bypass"
+
+LFI_TYPES = frozenset({
+    "local_file_inclusion",
+    "file_inclusion",
+    "lfi",
+    "path_traversal",
+    "directory_traversal",
+})
+XXE_TYPES = frozenset({"xxe", "xml_external_entity", "xml_injection"})
+IDOR_TYPES = frozenset({
+    "idor",
+    "insecure_direct_object_reference",
+    "broken_access_control",
+    "authorization_bypass",
+})
+SSTI_TYPES = frozenset({
+    "ssti",
+    "server_side_template_injection",
+    "template_injection",
+})
+AUTH_BYPASS_TYPES = frozenset({
+    "auth_bypass",
+    "authentication_bypass",
+    "broken_authentication",
+    "missing_authentication",
+    "unauthenticated_access",
+    "insecure_authentication",
+})
+
+LFI_REQUEST_SHAPES = frozenset(
+    (method, location)
+    for method in ("GET", "POST", "PUT", "PATCH")
+    for location in ("query", "form", "json", "cookie")
+)
+XXE_REQUEST_SHAPES = frozenset(
+    (method, location)
+    for method in ("POST", "PUT", "PATCH")
+    for location in ("json", "form")
+)
+IDOR_REQUEST_SHAPES = frozenset(
+    (method, location)
+    for method in ("GET", "POST", "PUT", "PATCH", "DELETE")
+    for location in ("query", "form", "json", "path", "cookie")
+)
+SSTI_REQUEST_SHAPES = frozenset(
+    (method, location)
+    for method in ("GET", "POST", "PUT", "PATCH")
+    for location in ("query", "form", "json", "cookie")
+)
+
+_PARAMETER_TYPE_REQUEST_SHAPES: Dict[str, frozenset] = {
+    **{t: SQLI_REQUEST_SHAPES for t in SQLI_TYPES},
+    **{t: REFLECTED_XSS_REQUEST_SHAPES for t in REFLECTED_XSS_TYPES},
+    **{t: SSRF_REQUEST_SHAPES for t in SSRF_TYPES},
+    **{t: LFI_REQUEST_SHAPES for t in LFI_TYPES},
+    **{t: XXE_REQUEST_SHAPES for t in XXE_TYPES},
+    **{t: IDOR_REQUEST_SHAPES for t in IDOR_TYPES},
+    **{t: SSTI_REQUEST_SHAPES for t in SSTI_TYPES},
+}
+
 
 class ScannerNormalizationError(ValueError):
     """Raised when an internal scanner record cannot be safely normalized."""
@@ -488,17 +553,16 @@ def normalize_scanner_candidate(record: ScannerCandidateRecord) -> Finding:
         else None
     )
     parameter = record.parameter_name.strip() if record.parameter_name else None
+    shapes_for_type = _PARAMETER_TYPE_REQUEST_SHAPES.get(normalized_type)
     complete_parameter_context = bool(
         record.endpoint
         and method
         and location
         and parameter
         and (
-            (method, location) in SQLI_REQUEST_SHAPES
-            if normalized_type in SQLI_TYPES
-            else (method, location) in SSRF_REQUEST_SHAPES
-            if normalized_type in SSRF_TYPES
-            else (method, location) in REFLECTED_XSS_REQUEST_SHAPES
+            (method, location) in shapes_for_type
+            if shapes_for_type is not None
+            else False
         )
     )
 
@@ -516,6 +580,22 @@ def normalize_scanner_candidate(record: ScannerCandidateRecord) -> Finding:
         canonical_type = "ssrf"
         if complete_parameter_context:
             validator_id = GENERIC_SSRF_VALIDATOR_ID
+    elif normalized_type in LFI_TYPES:
+        canonical_type = "local_file_inclusion"
+        if complete_parameter_context:
+            validator_id = GENERIC_LFI_VALIDATOR_ID
+    elif normalized_type in XXE_TYPES:
+        canonical_type = "xml_external_entity"
+        if complete_parameter_context:
+            validator_id = GENERIC_XXE_VALIDATOR_ID
+    elif normalized_type in IDOR_TYPES:
+        canonical_type = "insecure_direct_object_reference"
+        if complete_parameter_context:
+            validator_id = GENERIC_IDOR_VALIDATOR_ID
+    elif normalized_type in SSTI_TYPES:
+        canonical_type = "server_side_template_injection"
+        if complete_parameter_context:
+            validator_id = GENERIC_SSTI_VALIDATOR_ID
     elif normalized_type in EXPOSURE_TYPE_MAP:
         canonical_type = EXPOSURE_TYPE_MAP[normalized_type]
         if record.endpoint:
@@ -526,6 +606,12 @@ def normalize_scanner_candidate(record: ScannerCandidateRecord) -> Finding:
     elif normalized_type in COMMAND_EXECUTION_TYPES:
         canonical_type = "command_execution"
         # Deliberately manual review: active command execution is fixture-only.
+    elif normalized_type in AUTH_BYPASS_TYPES:
+        canonical_type = "authentication_bypass"
+        # Auth-bypass validation needs only an endpoint + HTTP method; no
+        # parameter context is required.
+        if record.endpoint and method:
+            validator_id = GENERIC_AUTH_BYPASS_VALIDATOR_ID
 
     return _candidate_finding(
         record,
