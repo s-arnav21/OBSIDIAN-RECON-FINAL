@@ -1,18 +1,68 @@
-"""In-memory scan job store for the async console flow.
+"""Scan job store for the async console flow, durable across restarts.
 
 A ScanJob holds an ordered journal of live steps (the tick list the UI polls)
-plus the final report once the background thread finishes. Jobs are ephemeral
-and purely in-memory — this is a dev-console feature, not durable state.
+plus the final report once the background thread finishes.  Jobs live in
+memory for the lifetime of the process AND are snapshotted to a JSON file in
+the data dir whenever they are created, complete a step, or end.  On a fresh
+process the durable records are reloaded so past jobs stay visible; any job
+that was mid-flight when the process died is surfaced as failed with an
+explicit restart-interruption marker instead of vanishing silently.
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
 import uuid
+from pathlib import Path
+
+from app.core.config import data_file
 
 DONE, FAILED, RUNNING, PENDING, SKIPPED, CANCELLED = (
     "done", "failed", "running", "pending", "skipped", "cancelled",
 )
+
+_DISK_LOCK = threading.Lock()
+
+
+def _job_store_path() -> Path:
+    return Path(data_file("scan_jobs.json"))
+
+
+def _load_disk_records() -> dict:
+    path = _job_store_path()
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            records = json.load(fh)
+        return records if isinstance(records, dict) else {}
+    except Exception:  # defensive: a corrupt store never breaks the API
+        return {}
+
+
+def _write_disk_records(records: dict) -> None:
+    path = _job_store_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(".json.tmp")
+    with open(temp, "w", encoding="utf-8") as fh:
+        json.dump(records, fh, default=str)
+    temp.replace(path)
+
+
+def _save_job_to_disk(job: "ScanJob") -> None:
+    """Merge one job's durable record into the on-disk store."""
+    with _DISK_LOCK:
+        records = _load_disk_records()
+        records[job.id] = job.to_durable_record()
+        _write_disk_records(records)
+
+
+def _drop_job_from_disk(job_id: str) -> None:
+    with _DISK_LOCK:
+        records = _load_disk_records()
+        if records.pop(job_id, None) is not None:
+            _write_disk_records(records)
 
 
 class ScanJob:
@@ -32,6 +82,36 @@ class ScanJob:
         self.finished_at: float | None = None
         self._lock = threading.Lock()
         self._seq_counter = 0
+
+    def to_durable_record(self) -> dict:
+        return {
+            "id": self.id,
+            "target": self.target,
+            "name": self.name,
+            "status": self.status,
+            "error": self.error,
+            "result": self.result,
+            "handoff": self.handoff,
+            "steps": [dict(s) for s in self.steps],
+            "findings": list(self.findings),
+            "created_at": self.created_at,
+            "finished_at": self.finished_at,
+        }
+
+    @classmethod
+    def from_durable_record(cls, record: dict) -> "ScanJob":
+        job = cls(record.get("target", ""), name=record.get("name"))
+        job.id = str(record.get("id", job.id))
+        job.status = record.get("status", job.status)
+        job.error = record.get("error")
+        job.result = record.get("result")
+        job.handoff = record.get("handoff")
+        job.steps = list(record.get("steps") or [])
+        job.steps_by_id = {s["id"]: s for s in job.steps if "id" in s}
+        job.findings = list(record.get("findings") or [])
+        job.created_at = record.get("created_at", job.created_at)
+        job.finished_at = record.get("finished_at")
+        return job
 
     def preseed(self, step_id: str, label: str, phase: str = "") -> None:
         """Register a step that may or may not run (starts as 'pending')."""
@@ -85,6 +165,7 @@ class ScanJob:
             if step.get("started_at"):
                 step["duration_ms"] = int((time.time() - step["started_at"]) * 1000)
             self._assign_seq(step)
+        _save_job_to_disk(self)
 
     def _assign_seq(self, step: dict) -> None:
         """Stamp the run-sequence number once (first time the step goes live).
@@ -118,6 +199,7 @@ class ScanJob:
             self._finalize_leftover_steps(pending_reason="not selected",
                                           running_mark=FAILED,
                                           running_error="interrupted")
+        _save_job_to_disk(self)
 
     def request_cancel(self) -> bool:
         """Signal the running job to halt as soon as it can. Returns True when
@@ -140,6 +222,7 @@ class ScanJob:
             self._finalize_leftover_steps(pending_reason="not selected",
                                           running_mark=CANCELLED,
                                           running_error="cancelled by user")
+        _save_job_to_disk(self)
 
     def _finalize_leftover_steps(self, pending_reason: str,
                                  running_mark: str, running_error: str) -> None:
@@ -186,27 +269,64 @@ class ScanJob:
 
 _JOBS: dict[str, ScanJob] = {}
 _JOBS_LOCK = threading.Lock()
+_RECOVERED = False
+
+
+def _ensure_recovered() -> None:
+    """Reload durable job records on the first job access of the process.
+
+    Any job persisted as ``running`` when the previous process died is
+    surfaced as failed with an explicit restart-interruption marker rather
+    than disappearing -- the UI can show what happened and the operator can
+    re-run the scan instead of guessing.
+    """
+    global _RECOVERED
+    if _RECOVERED:
+        return
+    with _JOBS_LOCK:
+        if _RECOVERED:
+            return
+        for record in _load_disk_records().values():
+            if not isinstance(record, dict) or not record.get("id"):
+                continue
+            job = ScanJob.from_durable_record(record)
+            if job.id in _JOBS:
+                continue
+            if job.status == RUNNING:
+                job.status = FAILED
+                job.error = "process interrupted by restart"
+                job.finished_at = time.time()
+                job._finalize_leftover_steps(pending_reason="not selected",
+                                             running_mark=FAILED,
+                                             running_error="interrupted")
+            _JOBS[job.id] = job
+        _RECOVERED = True
 
 
 def create_job(target: str, name: str | None = None) -> ScanJob:
+    _ensure_recovered()
     job = ScanJob(target, name=name)
     with _JOBS_LOCK:
         _JOBS[job.id] = job
+    _save_job_to_disk(job)
     return job
 
 
 def get_job(job_id: str) -> ScanJob | None:
+    _ensure_recovered()
     with _JOBS_LOCK:
         return _JOBS.get(job_id)
 
 
 def prune_jobs(max_age: float = 7200) -> None:
     """Drop finished jobs older than max_age seconds (best-effort cleanup)."""
+    _ensure_recovered()
     now = time.time()
     with _JOBS_LOCK:
         for jid in [j for j, jb in _JOBS.items()
                     if jb.finished_at and now - jb.finished_at > max_age]:
             del _JOBS[jid]
+            _drop_job_from_disk(jid)
 
 
 def make_progress_callback(job: ScanJob):

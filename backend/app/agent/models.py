@@ -7,11 +7,12 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 from app.attack_chain.engine import BASE_CAPABILITIES
 from app.attack_chain.mitre_mapping import enrich_finding_model
+from app.core.config import settings
 from app.models.finding import Finding, ParameterLocation, ValidationStatus
 from app.scanning.scope import ReconScopeError, normalize_origin
 
 
-ABSOLUTE_MAX_AGENT_STEPS = 10
+ABSOLUTE_MAX_AGENT_STEPS = settings.AGENT_MAX_STEPS
 MAX_AGENT_FINDINGS = 100
 MAX_STATE_COLLECTION_ITEMS = 100
 MAX_REASON_LENGTH = 256

@@ -46,8 +46,13 @@ def run_skills(ctx: SkillContext,
     # Selection is re-evaluated whenever the accumulated context changes, so a
     # skill gated on a condition another skill produces mid-phase (e.g. a
     # discovered login form enabling default-creds) still gets selected and run.
+    # Each iteration consumes at least one new skill (seen_names grows), but a
+    # hard cap protects against a pathological selector that keeps yielding new
+    # skills forever.
     seen_names: set[str] = set()
-    while True:
+    max_iterations = 100
+    while max_iterations > 0:
+        max_iterations -= 1
         if cancel_event is not None and cancel_event.is_set():
             raise ScanCancelled()
 

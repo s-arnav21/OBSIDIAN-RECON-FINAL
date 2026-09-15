@@ -13,6 +13,7 @@ from app.agent.llm_planner import LLMPlanner
 from app.agent.models import AgentState, ABSOLUTE_MAX_AGENT_STEPS
 from app.agent.run_service import AgentRunService
 from app.agent.tools import AgentToolRegistry
+from app.core.config import settings
 from app.db.session import get_db
 from app.db.repository import PersistenceRepository
 from app.db.serialization import finding_orm_to_model
@@ -29,7 +30,7 @@ class AgentRunRequest(BaseModel):
     scan_id: str
     asset_id: str
     finding_ids: List[str] = Field(default_factory=list)
-    maximum_steps: int = Field(default=5, ge=1, le=ABSOLUTE_MAX_AGENT_STEPS)
+    maximum_steps: int = Field(default=settings.AGENT_MAX_STEPS, ge=1, le=settings.AGENT_MAX_STEPS)
     authorized: StrictBool = False
 
 
@@ -96,7 +97,7 @@ def run_agent(
     else:
         findings_orm = [
             f for f in all_findings_orm if f.status in eligible_statuses
-        ][:ABSOLUTE_MAX_AGENT_STEPS * 2]
+        ][:settings.AGENT_MAX_STEPS * 2]
 
     if not findings_orm:
         raise HTTPException(

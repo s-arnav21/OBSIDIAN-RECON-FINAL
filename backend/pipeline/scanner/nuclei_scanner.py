@@ -18,6 +18,7 @@ import json
 import subprocess
 from typing import List, Optional
 
+from app.core.config import settings
 from app.models.scanner import RawFinding
 from pipeline.scanner import base
 
@@ -34,9 +35,10 @@ BROAD_TAGS = (
     "generic-detections,http,web,cloud,defaults,ssl,tls,certificate"
 )
 
-# Concurrency / rate-limit for generous findings.
-CONCURRENCY = 100   # parallel threads
-RATE_LIMIT = 250    # requests per second
+# Concurrency / rate-limit.  Defaults are conservative so real targets are not
+# rate-limited (429s) or connection-dropped; override via .env.
+CONCURRENCY = settings.NUCLEI_CONCURRENCY   # parallel threads
+RATE_LIMIT = settings.NUCLEI_RATE_LIMIT     # requests per second
 TIMEOUT_SECS = 10   # per-request timeout
 
 # Tags the normalizer can resolve into canonical vulnerability types.
