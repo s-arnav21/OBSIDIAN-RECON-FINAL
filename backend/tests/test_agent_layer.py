@@ -16,7 +16,11 @@ from app.agent.models import (
 )
 from app.agent.orchestrator import AgentOrchestrator
 from app.agent.policy import AgentPolicyGate, PolicyDecisionCode
-from app.agent.tools import AgentToolRegistry, UnknownAgentToolError
+from app.agent.tools import (
+    TOOL_REGISTRY,
+    AgentToolRegistry,
+    UnknownAgentToolError,
+)
 from app.models.finding import Finding, ValidationStatus
 from app.models.validation import ValidationResult
 
@@ -262,12 +266,16 @@ class AgentContractTests(unittest.TestCase):
 
 
 class AgentToolRegistryTests(unittest.TestCase):
-    def test_registry_discovers_only_fixed_validator_backed_tools(self):
+    def test_registry_discovers_fixed_validators_and_real_tools(self):
         registry = AgentToolRegistry()
         tools = registry.list_tools()
-        self.assertEqual(len(tools), 6)
+        self.assertEqual(len(tools), len(TOOL_REGISTRY))
         self.assertEqual(
-            {tool.validator_id for tool in tools},
+            {
+                tool.validator_id
+                for tool in tools
+                if tool.validator_id is not None
+            },
             {
                 "generic-http-sqli",
                 "generic-http-reflected-xss",
@@ -277,6 +285,10 @@ class AgentToolRegistryTests(unittest.TestCase):
                 "controlled-http-system-information-discovery",
             },
         )
+        tool_ids = {tool.tool_id for tool in tools}
+        self.assertIn("sqlmap-exploit", tool_ids)
+        self.assertIn("metasploit-eternalblue", tool_ids)
+        self.assertIn("validate-system-information-discovery-simulation", tool_ids)
         self.assertNotIn("dvwa-sqli-low", str(registry.planner_catalog()))
         self.assertNotIn("handler", str(registry.planner_catalog()))
 
@@ -705,7 +717,18 @@ class AgentOrchestratorTests(unittest.TestCase):
             "confirmed",
         )
         self.assertNotIn("must-never-reach-planner", str(planner.states))
-        self.assertEqual(len(planner.catalogs[0]), 6)
+        catalog_ids = {tool["tool_id"] for tool in planner.catalogs[0]}
+        self.assertLessEqual(
+            {
+                "validate-sql-injection",
+                "validate-reflected-xss",
+                "validate-ssrf",
+                "validate-exposed-resource",
+                "validate-command-execution-simulation",
+                "validate-system-information-discovery-simulation",
+            },
+            catalog_ids,
+        )
 
     def test_policy_denial_blocks_orchestration(self):
         planner = QueuePlanner([action(tool_id="unknown-agent-tool")])

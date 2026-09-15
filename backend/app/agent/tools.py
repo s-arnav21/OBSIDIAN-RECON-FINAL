@@ -95,21 +95,26 @@ TOOL_REGISTRY: Dict[str, AgentTool] = {
         name="Reflected XSS Validator",
         description="Internal HTTP probe for reflected XSS.",
         category=ToolCategory.VALIDATOR,
-        vuln_types=["xss", "reflected-xss"],
+        vuln_types=["xss", "reflected-xss",
+                    "cross-site-scripting", "reflected-cross-site-scripting"],
     ),
     "validate-ssrf": AgentTool(
         tool_id="validate-ssrf",
         name="SSRF Validator",
         description="Internal HTTP probe for SSRF via canary.",
         category=ToolCategory.VALIDATOR,
-        vuln_types=["ssrf"],
+        vuln_types=["ssrf", "server-side-request-forgery"],
     ),
     "validate-exposed-resource": AgentTool(
         tool_id="validate-exposed-resource",
         name="Exposed Resource Validator",
         description="Checks for exposed .env, .git, backup files.",
         category=ToolCategory.VALIDATOR,
-        vuln_types=["exposed-config", "git-exposed", "env-exposed"],
+        vuln_types=["exposed-config", "git-exposed", "env-exposed",
+                    "information-disclosure", "exposure",
+                    "sensitive-data-exposure", "open-service-exposure",
+                    "security-header", "reconnaissance", "http-variant-diff",
+                    "misconfiguration"],
     ),
     "validate-command-execution-simulation": AgentTool(
         tool_id="validate-command-execution-simulation",
@@ -118,12 +123,12 @@ TOOL_REGISTRY: Dict[str, AgentTool] = {
         category=ToolCategory.VALIDATOR,
         vuln_types=["command-execution", "rce"],
     ),
-    "validate-system-information-discovery": AgentTool(
-        tool_id="validate-system-information-discovery",
-        name="System Information Validator",
+    "validate-system-information-discovery-simulation": AgentTool(
+        tool_id="validate-system-information-discovery-simulation",
+        name="System Information Discovery Validator",
         description="Loopback system info discovery simulation.",
         category=ToolCategory.VALIDATOR,
-        vuln_types=["information-disclosure"],
+        vuln_types=["system-information-discovery"],
     ),
 
     # ── Real tool: sqlmap ───────────────────────────────────────────────────
@@ -837,8 +842,9 @@ VULN_TO_TOOL_PRIORITY: Dict[str, List[str]] = {
     "exposed-config":         ["validate-exposed-resource"],
     "git-exposed":            ["validate-exposed-resource"],
     "env-exposed":            ["validate-exposed-resource"],
-    "information-disclosure": ["validate-system-information-discovery",
-                               "nikto-scan"],
+    "information-disclosure": ["validate-exposed-resource", "nikto-scan"],
+    "system-information-discovery": [
+        "validate-system-information-discovery-simulation"],
     "misconfiguration":       ["nikto-scan"],
     "open-service-exposure":  ["nmap-vuln-scripts"],
     "cve":                    ["nmap-vuln-scripts", "metasploit-eternalblue"],
@@ -894,7 +900,7 @@ def execute_tool(tool_id: str, options: Dict[str, Any]) -> ToolResult:
         "validate-ssrf":                             None,
         "validate-exposed-resource":                 None,
         "validate-command-execution-simulation":     None,
-        "validate-system-information-discovery":     None,
+        "validate-system-information-discovery-simulation": None,
 
         # Real tools
         "sqlmap-exploit":           _exec_sqlmap,
@@ -991,7 +997,7 @@ _VALIDATOR_ID_MAP: Dict[str, str] = {
     "validate-ssrf": "generic-http-ssrf",
     "validate-exposed-resource": "generic-http-exposed-resource",
     "validate-command-execution-simulation": "generic-http-command-execution",
-    "validate-system-information-discovery": "controlled-http-system-information-discovery",
+    "validate-system-information-discovery-simulation": "controlled-http-system-information-discovery",
 }
 
 _DEFAULT_ALLOWED_OPTIONS: Tuple[str, ...] = (
@@ -1000,6 +1006,45 @@ _DEFAULT_ALLOWED_OPTIONS: Tuple[str, ...] = (
     "parameter_name",
     "parameter_location",
 )
+
+
+# Per-validator capability and targeting metadata preserved from the original
+# six-tool agent contract. Real external tools expose no extra capabilities
+# and accept no planner-supplied targeting options.
+_VALIDATOR_TOOL_METADATA: Dict[str, Dict[str, Tuple[str, ...]]] = {
+    "validate-sql-injection": {
+        "requires_any": ("discovered_services", "reachable_web_application"),
+        "provides": ("application_compromise", "possible_database_access"),
+        "allowed_options": _DEFAULT_ALLOWED_OPTIONS,
+    },
+    "validate-reflected-xss": {
+        "requires_any": ("discovered_services", "reachable_web_application"),
+        "allowed_options": _DEFAULT_ALLOWED_OPTIONS,
+    },
+    "validate-ssrf": {
+        "requires_any": ("discovered_services", "reachable_web_application"),
+        "allowed_options": ("endpoint",),
+    },
+    "validate-exposed-resource": {
+        "requires_any": (
+            "discovered_services",
+            "reachable_web_application",
+            "adversary_reconnaissance_observed",
+        ),
+        "provides": ("potential_information_exposure",),
+        "allowed_options": ("endpoint",),
+    },
+    "validate-command-execution-simulation": {
+        "requires_any": ("application_compromise",),
+        "provides": ("command_execution",),
+        "allowed_options": (),
+    },
+    "validate-system-information-discovery-simulation": {
+        "requires_any": ("command_execution",),
+        "provides": ("system_information",),
+        "allowed_options": (),
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -1058,14 +1103,18 @@ def _build_default_definitions() -> Tuple[AgentToolDefinition, ...]:
     definitions = []
     for tool_id, tool in TOOL_REGISTRY.items():
         validator_id = _VALIDATOR_ID_MAP.get(tool_id)
+        metadata = _VALIDATOR_TOOL_METADATA.get(tool_id, {})
         vuln_types = tuple(tool.vuln_types) if tool.vuln_types else ("unknown",)
         definitions.append(AgentToolDefinition(
             tool_id=tool_id,
             validator_id=validator_id,
             vulnerability_types=vuln_types,
             description=tool.description,
+            requires_all=metadata.get("requires_all", ()),
+            requires_any=metadata.get("requires_any", ()),
+            provides=metadata.get("provides", ()),
             automatic_allowed=True,
-            allowed_options=_DEFAULT_ALLOWED_OPTIONS if validator_id else (),
+            allowed_options=metadata.get("allowed_options", ()),
         ))
     return tuple(definitions)
 
