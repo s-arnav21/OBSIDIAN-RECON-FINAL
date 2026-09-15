@@ -6,7 +6,10 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.agent import router as agent_router
 from app.api.attacks import router as attacks_router
-from app.api.exploit import router as exploit_router
+# Legacy exploitation API backed by the separate `obsidian_recon` database.
+# The unified `attacks`/`scans` routers below are the single source of truth;
+# the legacy router is retired so the app operates on one database.
+# from app.api.exploit import router as exploit_router
 from app.api.jobs import router as jobs_router
 from app.api.readiness import router as readiness_router
 from app.api.recon import router as recon_router
@@ -35,7 +38,7 @@ app.include_router(recon_router)
 app.include_router(jobs_router)
 app.include_router(scans_router)
 app.include_router(target_verifications_router)
-app.include_router(exploit_router)
+# app.include_router(exploit_router)
 app.include_router(agent_router)
 app.include_router(attacks_router)
 app.include_router(security_router)
