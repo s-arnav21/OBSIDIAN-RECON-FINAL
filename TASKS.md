@@ -8,7 +8,7 @@ Status: `[ ]` pending · `[x]` done · `[~]` in progress
 - [x] Subdomain enumeration no longer `(excluded)` — `subdomains` scanner removed from vm/ctf skip lists (pure-Python httpx, produces live-subdomain findings).
 - [x] Progress bar reflects ONLY executed steps — `ScanJob.snapshot().done` = DONE+FAILED only; skipped/pending excluded (`backend/app/core/progress.py`).
 - [x] Journal ticks off steps as they actually run — skipped steps stay `·`/pending `○`; nothing pre-marks as done.
-- [x] Manifest (62 items) seeded in real execution order — recon → recon skills → network → web → exploit → scanners (subdomains→http probe→nmap→nuclei→nmap tls→content→waf detect) → subdomain chain → origin hunt → triage·validation·normalization (`seed_manifest` + `_SKILL_PHASE_ORDER`).
+- [x] Manifest (62 items) seeded in real execution order — recon → recon skills → network → web → exploit (gated) → scanners (subdomains→http probe→nmap→nuclei→nmap tls→content→waf detect) → subdomain chain → origin hunt → triage·validation·normalization (`seed_manifest` + `_SKILL_PHASE_ORDER`).
 - [x] Journal renders in run order — steps sorted by run `seq` (stamped when each goes live) in `renderJournal`/`sortBySeq` (`backend/app/static/recon.js`).
 - [x] Severity Summary headers use human labels — `vulnLabel()` map in `recon.js` + `label` field from KB in `remediation_plan.py`; `reconnaissance`/`misconfiguration` render as proper titles.
 - [x] Recon is robust for websites AND VMs — tools auto-resolved (nuclei/nmap/httpx/subfinder verified), subdomain scanner is pure-Python httpx, nuclei tolerates non-zero exits when JSONL output exists.
@@ -89,7 +89,7 @@ Status: `[ ]` pending · `[x]` done · `[~]` in progress
 
 ## 13. Verification
 
-- [x] Backend test suite passes — `735 passed, 260 subtests` (run from `backend/`)
+- [x] Backend test suite passes — `861 passed, 264 subtests` (run from `backend/`)
 - [x] Nuclei/nmap/httpx/subfinder all resolve via `_resolve_executable`
 - [x] Live run on `https://mukeshpatel.mylineupx.com/` — vm profile: recon ~25s → port-scan bounded 121s (degrades to top-ports on CDN) → subdomain scanner ~15-43s (89 live-subdomain findings) → http_probe → nmap scanner bounded 121s → nuclei → tls-audit ≤130s → finalize.
 - [x] webapp profile: fast path uses `--top-ports 1000` (port-scan ~73s incl. banner pass on 80/443).
@@ -116,3 +116,40 @@ the count is **~62** steps:
 
 Skill/profiling detail: `backend/skills/` (registry + runner + selector),
 scanner order: `backend/pipeline/scanner/__init__.py`.
+
+---
+
+## 14. Operational hardening & honest scope (audit)
+
+Status: `[ ]` pending · `[x]` done · `[~]` in progress
+
+- [x] API access control (opt-in) — `API_AUTH_TOKEN` gates every API router via
+  `require_api_key` (`X-API-Key`, constant-time compare); readiness/static stay
+  open (`backend/app/api/auth.py`, `backend/app/main.py`; tests `test_api_auth.py`).
+- [x] Nuclei tuning is configurable — `NUCLEI_CONCURRENCY` (20) /
+  `NUCLEI_RATE_LIMIT` (50) env vars replace hardcoded 100/250
+  (`backend/app/core/config.py`, `backend/pipeline/scanner/nuclei_scanner.py`).
+- [x] Job state is durable — `ScanJob` persists to `data/scan_jobs.json` on
+  create/finish/result/cancel/prune; restart recovery marks interrupted jobs
+  failed (`backend/app/core/progress.py`; tests `test_scan_jobs.py`).
+- [x] Agent step cap is env-driven — `AGENT_MAX_STEPS` (default 10) bounds each
+  agent run (`backend/app/core/config.py`, `app/api/agent.py`).
+- [x] Skill re-selection is bounded — the per-batch selector pass is by design
+  (skills emit context conditions that enable downstream skills); a
+  `max_iterations=100` safety cap prevents runaway loops, and `seen_names`
+  prevents duplicate runs (`backend/skills/runner.py`).
+- [x] Retesting loop — `/api/security/retest` + `/api/security/retest/single`
+  re-run registered validators and record a `retest_result` evidence row
+  (`backend/app/services/retesting.py`; tests `test_new_security_features.py`).
+- [x] Shell persistence — agent-obtained meterpreter sessions automatically
+  write a `ShellORM` row (host/port parsed, `active=True`) when the step
+  completes under operator authorization (`backend/app/services/agent_persistence.py`).
+- [ ] Reverse-shell catch / interactive shell channel — TCP listener service,
+  catch-into-`shells`, and bidirectional command I/O. **Future scope**, not
+  claimed as built (see README scope boundary).
+- [ ] Full post-exploitation (privilege escalation execution, pivoting).
+  **Future scope** — advisories and plans exist; execution is not claimed.
+
+Exploit skills are phase-gated by design: the default `webapp` profile has
+`allow_exploit_skills=False`; only `vm`/`ctf` enable exploitation against
+isolated lab VMs (`backend/app/core/profiles.py`).

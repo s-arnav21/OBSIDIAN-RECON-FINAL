@@ -2,11 +2,19 @@
 
 AI-Powered Automated Penetration Testing Platform
 
-Obsidian Recon runs a full reconnaissance → persistence → exploitation
-pipeline: passive OSINT + 51 skills, a 7-step scanner chain (subdomains, HTTP
-probe, nmap, nuclei, TLS audit, content discovery, WAF detect), triage /
-validation / normalization into a unified Postgres store, and an optional
-LLM-driven exploit planner/agent that produces proof-of-concept based plans.
+Obsidian Recon runs a reconnaissance → detection → validated-findings pipeline:
+passive OSINT + 51 skills, a 7-step scanner chain (subdomains, HTTP probe, nmap,
+nuclei, TLS audit, content discovery, WAF detect), triage / validation /
+normalization into a unified Postgres store, and an optional LLM-driven exploit
+planner/agent that produces proof-of-concept based plans for findings surfaced
+to the Attacks UI.
+
+**Current scope boundary.** Live exploitation probes are profile-gated — the
+default `webapp` profile runs reconnaissance and validation with *no* active
+exploit skills; the `vm` and `ctf` profiles enable the exploit phase for
+isolated lab VMs. Reverse-shell catch, an interactive shell channel, and full
+post-exploitation are planned extensions, not current scope. The platform's
+deliverable is validated findings plus PoC plans, not compromised hosts.
 
 ---
 
@@ -134,10 +142,12 @@ AGENT_LLM_TIMEOUT=15
 
 ```bash
 cd backend && source ../venv/bin/activate
-pytest -q        # full backend suite (735 passed, 260 subtests)
+pytest -q        # full backend suite (861 passed, 264 subtests)
 ```
 
 Scan flow: submit a target in the Recon UI → job manifest (~62 steps) runs
 recon → skills → scanners → chain → finalize → persists findings to Postgres →
 exploitable findings (`confirmed`/`manual_review`) feed the Attacks UI / LLM
-agent for proof-of-concept planning and execution.
+agent for proof-of-concept planning. Live exploit skills run only when the
+profile enables the exploit phase (`vm`/`ctf`); the default `webapp` profile
+evaluates authorization but runs no exploit skills.
