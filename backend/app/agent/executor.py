@@ -336,5 +336,7 @@ class AgentToolExecutor:
                 summary=summary,
                 error_category=None if success else "tool_reported_error",
                 options_used=action.options,
+                shell_obtained=result.shell_obtained,
+                shell_info=result.shell_info,
             ),
         )

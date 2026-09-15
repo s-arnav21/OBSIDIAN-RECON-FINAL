@@ -143,6 +143,45 @@ def make_completed_result() -> AgentRunResult:
     )
 
 
+def make_shell_result() -> AgentRunResult:
+    action = replace(make_action(), tool_id="metasploit-web-rce")
+    policy = make_policy(action)
+    observation = AgentObservation(
+        action_id=action.action_id,
+        tool_id=action.tool_id,
+        finding_id=action.finding_id,
+        policy_decision=PolicyDecisionCode.ALLOWED,
+        policy_allowed=True,
+        execution_status=AgentExecutionStatus.COMPLETED,
+        summary="Meterpreter session opened",
+        shell_obtained=True,
+        shell_info={
+            "session_id": "7",
+            "connection": "10.0.0.5:4444",
+            "type": "meterpreter",
+            "module": "exploit/multi/http/tomcat_mgr_upload",
+        },
+    )
+    initial = make_state()
+    final = replace(
+        initial,
+        status=AgentStatus.COMPLETED,
+        terminal_reason="planner_completed",
+        current_step=1,
+    )
+    step = AgentRunStep(
+        step_number=1,
+        proposed_action=action,
+        policy_decision=policy,
+        observation=observation,
+    )
+    return AgentRunResult(
+        initial_state=initial,
+        final_state=final,
+        steps=(step,),
+    )
+
+
 class AgentPersistenceTests(unittest.TestCase):
 
     def setUp(self):
@@ -292,6 +331,106 @@ class AgentPersistenceTests(unittest.TestCase):
         self.assertEqual(summary["validations"], 0)
         self.assertEqual(summary["findings_updated"], 0)
         self.assertEqual(summary["status"], "completed")
+
+    def test_agent_shell_is_persisted_automatically(self):
+        self._seed()
+        summary = persist_agent_run_results(
+            self.session,
+            scan_id=SCAN_ID,
+            result=make_shell_result(),
+        )
+
+        self.assertEqual(summary["shells"], 1)
+        session_row = self.repository.get_exploit_session(summary["session_id"])
+        shells = self.repository.list_shells_for_session(session_row.id)
+        self.assertEqual(len(shells), 1)
+        self.assertEqual(shells[0].shell_type, "meterpreter")
+        self.assertEqual(shells[0].host, "10.0.0.5")
+        self.assertEqual(shells[0].port, 4444)
+        self.assertEqual(shells[0].active, True)
+
+    def test_repeated_run_does_not_duplicate_shell_row(self):
+        self._seed()
+        first = persist_agent_run_results(
+            self.session,
+            scan_id=SCAN_ID,
+            result=make_shell_result(),
+        )
+        second = persist_agent_run_results(
+            self.session,
+            scan_id=SCAN_ID,
+            result=make_shell_result(),
+        )
+
+        self.assertEqual(first["shells"], 1)
+        self.assertEqual(second["shells"], 0)
+        session_row = self.repository.get_exploit_session(second["session_id"])
+        shells = self.repository.list_shells_for_session(session_row.id)
+        self.assertEqual(len(shells), 1)
+
+    def test_no_shell_persisted_when_none_obtained(self):
+        self._seed()
+        summary = persist_agent_run_results(
+            self.session,
+            scan_id=SCAN_ID,
+            result=make_completed_result(),
+        )
+
+        self.assertEqual(summary["shells"], 0)
+        session_row = self.repository.get_exploit_session(summary["session_id"])
+        self.assertEqual(self.repository.list_shells_for_session(session_row.id), [])
+
+    def test_rejected_shell_claim_is_not_persisted(self):
+        self._seed()
+        action = replace(make_action(), tool_id="metasploit-web-rce")
+        policy = PolicyDecision(
+            action_id=action.action_id,
+            tool_id=action.tool_id,
+            finding_id=action.finding_id,
+            allowed=False,
+            code=PolicyDecisionCode.DENIED_UNAUTHORIZED,
+            reason="not permitted",
+        )
+        observation = AgentObservation(
+            action_id=action.action_id,
+            tool_id=action.tool_id,
+            finding_id=action.finding_id,
+            policy_decision=policy.code,
+            policy_allowed=False,
+            execution_status=AgentExecutionStatus.BLOCKED,
+            summary="rejected by policy gate",
+            shell_obtained=True,
+            shell_info={"type": "meterpreter", "connection": "10.0.0.5:4444"},
+        )
+        initial = make_state()
+        final = replace(
+            initial,
+            status=AgentStatus.BLOCKED,
+            terminal_reason=policy.code,
+            current_step=1,
+        )
+        result = AgentRunResult(
+            initial_state=initial,
+            final_state=final,
+            steps=(
+                AgentRunStep(
+                    step_number=1,
+                    proposed_action=action,
+                    policy_decision=policy,
+                    observation=observation,
+                ),
+            ),
+        )
+
+        summary = persist_agent_run_results(
+            self.session,
+            scan_id=SCAN_ID,
+            result=result,
+        )
+
+        self.assertEqual(summary["shells"], 0)
+        session_row = self.repository.get_exploit_session(summary["session_id"])
+        self.assertEqual(self.repository.list_shells_for_session(session_row.id), [])
 
 
 class ExecutorSessionResolutionTests(unittest.TestCase):

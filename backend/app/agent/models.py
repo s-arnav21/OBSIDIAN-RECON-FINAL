@@ -88,6 +88,37 @@ def _string_tuple(values: Iterable[str], name: str) -> Tuple[str, ...]:
     return tuple(dict.fromkeys(value.strip() for value in normalized))
 
 
+def _bounded_string_map(
+    values: Any,
+    name: str,
+    *,
+    key_maximum: int = 128,
+    value_maximum: int = 256,
+    max_items: int = 10,
+) -> Dict[str, str]:
+    """Coerce an arbitrary mapping into bounded non-control-char strings."""
+    if values is None:
+        return {}
+    if not isinstance(values, dict):
+        raise TypeError(f"{name} must be a dict if provided")
+    if len(values) > max_items:
+        raise ValueError(f"{name} contains too many items")
+    result: Dict[str, str] = {}
+    for key, value in values.items():
+        if not isinstance(key, str) or not key.strip():
+            continue
+        if not isinstance(value, str):
+            continue
+        safe_key = key.strip()[:key_maximum]
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in safe_key):
+            continue
+        safe_value = value.strip()[:value_maximum]
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in safe_value):
+            continue
+        result[safe_key] = safe_value
+    return result
+
+
 def _same_origin(left: str, right: str) -> bool:
     try:
         return normalize_origin(left).origin == normalize_origin(right).origin
@@ -267,6 +298,8 @@ class AgentObservation:
     observed_response_length: Optional[int] = None
     waf_or_filter_interference: bool = False
     options_used: Tuple[Tuple[str, str], ...] = field(default_factory=tuple)
+    shell_obtained: bool = False
+    shell_info: Dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for name in ("action_id", "tool_id", "policy_decision"):
@@ -340,6 +373,13 @@ class AgentObservation:
             "options_used",
             _normalize_options(self.options_used),
         )
+        if type(self.shell_obtained) is not bool:
+            raise TypeError("shell_obtained must be a boolean")
+        object.__setattr__(
+            self,
+            "shell_info",
+            _bounded_string_map(self.shell_info, "shell_info"),
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -359,6 +399,8 @@ class AgentObservation:
             "observed_response_length": self.observed_response_length,
             "waf_or_filter_interference": self.waf_or_filter_interference,
             "options_used": list(self.options_used),
+            "shell_obtained": self.shell_obtained,
+            "shell_info": self.shell_info,
         }
 
 

@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -88,6 +88,76 @@ def _persist_step_exploit(
         outcome=outcome,
         output=json.dumps(output_data, default=str)[:250000],
     )
+
+
+def _parse_connection(value: Optional[str]) -> Tuple[Optional[str], Optional[int]]:
+    """Split a bounded ``host:port`` connection string into its parts."""
+    if not value or ":" not in value:
+        return (value or None), None
+    host, _, port_text = value.rpartition(":")
+    if not host:
+        return value, None
+    try:
+        port = int(port_text)
+    except ValueError:
+        return value, None
+    if not 1 <= port <= 65535:
+        return value, None
+    return host, port
+
+
+def _persist_step_shell(
+    repository: PersistenceRepository,
+    *,
+    session_id: str,
+    step: Any,
+) -> Optional[dict]:
+    """Persist a shell row when the step's tool reported one was obtained.
+
+    The metasploit tools surface an obtained meterpreter session through the
+    observation's bounded ``shell_info`` metadata.  Writing it to the unified
+    ``shells`` table makes the acquisition auditable from the exploit session
+    and removes the manual POST endpoint from being the only way a shell is
+    ever recorded.
+    """
+    observation = step.observation
+    if not observation.shell_obtained:
+        return None
+    if observation.execution_status != "completed":
+        return None
+    if not step.policy_decision.allowed:
+        return None
+
+    info = (
+        dict(observation.shell_info)
+        if isinstance(observation.shell_info, dict)
+        else {}
+    )
+    shell_type = str(info.get("type") or "meterpreter")[:64]
+    host, port = _parse_connection(info.get("connection"))
+
+    for existing in repository.list_shells_for_session(session_id):
+        if (
+            existing.shell_type == shell_type
+            and existing.host == host
+            and existing.port == port
+        ):
+            return None
+
+    record = repository.persist_shell(
+        shell_id=f"agent-shell-{uuid.uuid4()}",
+        session_id=session_id,
+        shell_type=shell_type,
+        host=host,
+        port=port,
+        active=True,
+    )
+    return {
+        "id": record.id,
+        "shell_type": record.shell_type,
+        "host": record.host,
+        "port": record.port,
+    }
 
 
 def _persist_validation_evidence(
@@ -197,6 +267,7 @@ def persist_agent_run_results(
     validation_count = 0
     findings_updated = 0
     incompatible_statuses = 0
+    shell_count = 0
     for step in result.steps:
         _persist_step_exploit(
             repository,
@@ -204,6 +275,13 @@ def persist_agent_run_results(
             step=step,
         )
         step_count += 1
+
+        if _persist_step_shell(
+            repository,
+            session_id=run_session.id,
+            step=step,
+        ) is not None:
+            shell_count += 1
 
         finding_id = step.proposed_action.finding_id or ""
         if not step.validation_result or not finding_id:
@@ -249,6 +327,7 @@ def persist_agent_run_results(
         "validations": validation_count,
         "findings_updated": findings_updated,
         "findings_skipped": incompatible_statuses,
+        "shells": shell_count,
     }
 
 

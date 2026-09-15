@@ -264,6 +264,51 @@ class AgentContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             replace(observation, summary="X" * 513)
 
+    def test_observation_shell_signal_is_sanitized(self):
+        observation = AgentObservation(
+            action_id="a",
+            tool_id="metasploit-web-rce",
+            finding_id="f",
+            policy_decision="allowed",
+            policy_allowed=True,
+            execution_status="completed",
+            summary="Meterpreter session opened",
+            shell_obtained=True,
+            shell_info={
+                "session_id": "7",
+                "connection": "10.0.0.5:4444",
+                "type": "meterpreter",
+                "junk": 1234,
+                "unsafe\x00key": "dropped",
+            },
+        )
+        self.assertEqual(observation.shell_obtained, True)
+        self.assertEqual(
+            observation.shell_info,
+            {
+                "session_id": "7",
+                "connection": "10.0.0.5:4444",
+                "type": "meterpreter",
+            },
+        )
+        self.assertEqual(
+            observation.to_dict()["shell_info"]["connection"],
+            "10.0.0.5:4444",
+        )
+
+    def test_observation_rejects_non_bool_shell_claim(self):
+        with self.assertRaises(TypeError):
+            AgentObservation(
+                action_id="a",
+                tool_id="metasploit-web-rce",
+                finding_id="f",
+                policy_decision="allowed",
+                policy_allowed=True,
+                execution_status="completed",
+                summary="Meterpreter session opened",
+                shell_obtained="yes",
+            )
+
 
 class AgentToolRegistryTests(unittest.TestCase):
     def test_registry_discovers_fixed_validators_and_real_tools(self):
