@@ -16,6 +16,7 @@ import httpx
 
 from app.models.finding import Finding, STATUS_WEIGHT, ValidationStatus
 from app.models.validation import ValidationResult
+from app.validation.tool_confirmation import sqlmap_confirmation
 
 
 VALIDATOR_ID = "generic-http-sqli"
@@ -172,6 +173,21 @@ def _context_evidence(finding: Finding) -> Dict[str, Any]:
         "http_method": finding.http_method,
         "parameter_name": finding.parameter_name,
         "parameter_location": finding.parameter_location,
+    }
+
+
+def _real_tool_summary(v: Any) -> Dict[str, Any]:
+    return {
+        "tool": getattr(v, "tool", "unknown"),
+        "available": getattr(v, "available", False),
+        "ran": getattr(v, "ran", False),
+        "confirmed": getattr(v, "confirmed", False),
+        "not_vulnerable": getattr(v, "not_vulnerable", False),
+        "timed_out": getattr(v, "timed_out", False),
+        "error": getattr(v, "error", None),
+        "dbms": getattr(v, "dbms", None),
+        "databases": getattr(v, "databases", []),
+        "duration_seconds": getattr(v, "duration_seconds", None),
     }
 
 
@@ -865,6 +881,8 @@ def validate_generic_http_sqli(
             finding, session, url=url,
         )
 
+    real_tool = sqlmap_confirmation(finding)
+
     if any(
         result.waf_or_filter_interference for result in results.values()
     ):
@@ -874,6 +892,7 @@ def validate_generic_http_sqli(
             decision="inconclusive",
             reason="waf_or_filter_interference",
         )
+        evidence["real_tool"] = _real_tool_summary(real_tool)
         return _manual_review(
             finding,
             "waf_or_filter_interference",
@@ -884,6 +903,68 @@ def validate_generic_http_sqli(
         name for name, result in results.items()
         if result.state == "confirmed"
     ]
+
+    # Genuine external tool confirmation takes priority.
+    if real_tool.usable and real_tool.confirmed:
+        evidence = _final_evidence(
+            finding,
+            results,
+            decision="confirmed",
+            reason="real_tool_sqlmap_confirmation",
+        )
+        evidence["real_tool"] = _real_tool_summary(real_tool)
+        heuristic_conf = (
+            _confirmed_confidence(triggered_methods)
+            if triggered_methods
+            else 0.0
+        )
+        confidence = min(0.99, max(0.95, heuristic_conf))
+        return ValidationResult(
+            status=ValidationStatus.CONFIRMED,
+            confidence=confidence,
+            validator=VALIDATOR_NAME,
+            method=f"{VALIDATION_METHOD} + sqlmap",
+            evidence=evidence,
+        )
+
+    # Real tool ran clean negative — reconcile with the heuristics.
+    if real_tool.usable and real_tool.not_vulnerable:
+        if triggered_methods:
+            evidence = _final_evidence(
+                finding,
+                results,
+                decision="inconclusive",
+                reason="real_tool_conflict_requires_human_review",
+            )
+            evidence["real_tool"] = _real_tool_summary(real_tool)
+            return _manual_review(
+                finding,
+                "real_tool_conflict_requires_human_review",
+                evidence=evidence,
+            )
+        all_negative = all(
+            result.state in {"negative", "error"}
+            for result in results.values()
+        )
+        if all_negative:
+            evidence = _final_evidence(
+                finding,
+                results,
+                decision="rejected",
+                reason="heuristics_and_real_tool_negative",
+            )
+            evidence["real_tool"] = _real_tool_summary(real_tool)
+            return ValidationResult(
+                status=ValidationStatus.REJECTED,
+                confidence=0.88,
+                validator=VALIDATOR_NAME,
+                method=f"{VALIDATION_METHOD} + sqlmap",
+                evidence=evidence,
+            )
+
+    # Real tool timed out or produced an error — the heuristic path below
+    # remains authoritative; the real_tool evidence stays for auditability.
+
     if triggered_methods:
         evidence = _final_evidence(
             finding,
@@ -891,6 +972,7 @@ def validate_generic_http_sqli(
             decision="confirmed",
             reason="one_or_more_detection_methods_confirmed",
         )
+        evidence["real_tool"] = _real_tool_summary(real_tool)
         return ValidationResult(
             status=ValidationStatus.CONFIRMED,
             confidence=_confirmed_confidence(triggered_methods),
@@ -907,6 +989,7 @@ def validate_generic_http_sqli(
             decision="rejected",
             reason="all_detection_methods_negative",
         )
+        evidence["real_tool"] = _real_tool_summary(real_tool)
         return ValidationResult(
             status=ValidationStatus.REJECTED,
             confidence=0.9,
@@ -921,6 +1004,7 @@ def validate_generic_http_sqli(
         decision="inconclusive",
         reason="incomplete_or_ambiguous_detection_coverage",
     )
+    evidence["real_tool"] = _real_tool_summary(real_tool)
     return _manual_review(
         finding,
         "incomplete_or_ambiguous_detection_coverage",

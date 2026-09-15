@@ -2,10 +2,13 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# System deps + the external recon CLIs the pipeline shells out to.
+# System deps + the external recon CLIs the pipeline shells out to, plus real
+# exploitation tooling: sqlmap (SQLi validation/exploitation confirmation),
+# nikto (webserver scanner), hydra (credential brute force).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         nmap ca-certificates curl unzip git openssh-client dnsutils \
+        sqlmap nikto hydra \
     && rm -rf /var/lib/apt/lists/*
 
 # feroxbuster -- recursive content brute-forcer (releases are static binaries).
