@@ -26,6 +26,8 @@ from app.models.finding import ValidationStatus
 from app.services.exploit_planner import (
     build_exploit_plan,
     load_llm_client,
+    recall_plan,
+    remember_plan,
 )
 from app.services.attack_execution import execute_planned_attack
 from app.services.exploitation import (
@@ -42,6 +44,49 @@ _ELIGIBLE_STATUSES = frozenset({
     ValidationStatus.CONFIRMED,
     ValidationStatus.MANUAL_REVIEW,
 })
+
+_SHELL_EVIDENCE_KEYS = ("shell_obtained", "is_shell", "shell")
+
+
+def _attempt_outcome(attempt: Optional[Dict[str, Any]]) -> str:
+    """Map a raw attempt status to the persisted exploit outcome.
+
+    Only a validator-confirmed result is exploitation. Exit-0 command output is
+    ``observed`` at execution time and must remain inconclusive here.
+    """
+    attempt_status = (attempt or {}).get("status")
+    if attempt_status in {None, "", "planned"}:
+        return "planned"
+    if attempt_status in {ValidationStatus.CONFIRMED, "confirmed"}:
+        return "success"
+    if attempt_status in {"failed", ValidationStatus.REJECTED, "rejected"}:
+        return "failed"
+    if attempt_status == "error":
+        return "error"
+    return "inconclusive"
+
+
+def _shell_obtained(attempt: Optional[Dict[str, Any]]) -> bool:
+    """True only when the attempt carries explicit evidence of a shell.
+
+    A confirmed vulnerability (for example SQL injection) can prove command
+    execution or data access without yielding an interactive shell. Reporting
+    one anyway is exactly the false-escalation this guards against.
+    """
+    if not isinstance(attempt, dict):
+        return False
+    if attempt.get("shell_obtained") is True:
+        return True
+    evidence = attempt.get("evidence")
+    if not isinstance(evidence, dict):
+        return False
+    containers = (evidence, evidence.get("scanner_evidence"))
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        if any(container.get(key) is True for key in _SHELL_EVIDENCE_KEYS):
+            return True
+    return False
 
 
 class SessionCreateRequest(BaseModel):
@@ -169,6 +214,7 @@ def plan_attack(
         )
 
     plan = build_exploit_plan(finding, client=load_llm_client())
+    remember_plan(finding.id, plan)
     return {
         "finding_id": finding.id,
         "vulnerability_type": finding.vulnerability_type,
@@ -211,26 +257,16 @@ def run_attack(
             ),
         )
 
-    plan = build_exploit_plan(finding, client=load_llm_client())
+    # Execute exactly the plan the operator previewed and authorized. Only build
+    # a new one when nothing was previewed for this finding.
+    plan = recall_plan(finding.id)
+    if plan is None:
+        plan = build_exploit_plan(finding, client=load_llm_client())
+        remember_plan(finding.id, plan)
     attempt = execute_planned_attack(plan, finding)
 
-    attempt_status = (attempt or {}).get("status")
-    if attempt_status in {None, "", "planned"}:
-        outcome = "planned"
-    elif attempt_status in {
-        "success",
-        ValidationStatus.CONFIRMED,
-    }:
-        outcome = "success"
-    elif attempt_status in {
-        "failed",
-        ValidationStatus.REJECTED,
-    }:
-        outcome = "failed"
-    elif attempt_status == "error":
-        outcome = "error"
-    else:
-        outcome = "inconclusive"
+    outcome = _attempt_outcome(attempt)
+    shell_obtained = _shell_obtained(attempt)
 
     module_name = (
         (plan.tooling[0] if plan.tooling else None)
@@ -247,6 +283,7 @@ def run_attack(
                 "stdout": (attempt or {}).get("stdout", ""),
                 "stderr": (attempt or {}).get("stderr", ""),
                 "decision": (attempt or {}).get("decision", ""),
+                "shell_obtained": shell_obtained,
             },
         },
         indent=2,
@@ -274,10 +311,13 @@ def run_attack(
     session.refresh(exploit)
     session.refresh(attack_session)
 
+    attempt_view = dict(attempt) if isinstance(attempt, dict) else {}
+    attempt_view["shell_obtained"] = shell_obtained
+
     return {
         "session": exploit_session_to_dict(attack_session),
         "plan": plan.to_dict(),
-        "attempt": attempt,
+        "attempt": attempt_view,
         "exploit": exploit_to_dict(exploit),
     }
 

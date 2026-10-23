@@ -10,6 +10,7 @@ node_modules/
 
 # Environment
 .env
+.env.bak
 
 # OS
 .DS_Store

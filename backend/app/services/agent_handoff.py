@@ -2,8 +2,8 @@
 
 After a full-scan job completes, this service creates an exploit session bound
 to the finished scan and auto-triggers the LLM agent against the scan's
-eligible findings — so the operator no longer has to open /exploit, create a
-session, and start the agent by hand.
+eligible findings — so the operator no longer has to open the attack console,
+create a session, and start the agent by hand.
 
 Every stage is idempotent and gated on persisted facts:
 

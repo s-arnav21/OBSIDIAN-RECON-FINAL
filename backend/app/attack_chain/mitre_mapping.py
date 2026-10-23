@@ -22,8 +22,6 @@ class TechniqueDefinition:
     requires_any: List[str] = field(default_factory=list)
     provides: List[str] = field(default_factory=list)
     vulnerability_types: List[str] = field(default_factory=list)
-    cwe_hints: List[str] = field(default_factory=list)
-    owasp_hints: List[str] = field(default_factory=list)
 
     @property
     def requires(self) -> List[str]:
@@ -82,10 +80,7 @@ TECHNIQUE_DEFINITIONS: Dict[str, TechniqueDefinition] = {
             "remote_code_execution",
             "command_injection",
             "deserialization",
-             "reconnaissance",
         ],
-        cwe_hints=["CWE-89", "CWE-78", "CWE-502"],
-        owasp_hints=["A03:2021"],
     ),
     "T1059.004": TechniqueDefinition(
         technique_id="T1059.004",
@@ -101,8 +96,6 @@ TECHNIQUE_DEFINITIONS: Dict[str, TechniqueDefinition] = {
             "command_execution",
             "unix_shell_command_execution",
         ],
-        cwe_hints=["CWE-78"],
-        owasp_hints=["A03:2021"],
     ),
     "T1082": TechniqueDefinition(
         technique_id="T1082",
@@ -125,8 +118,10 @@ TECHNIQUE_DEFINITIONS: Dict[str, TechniqueDefinition] = {
             "discovered_services",
             "reachable_login_service",
         ],
+        # Accepted credentials are credential access, not a reusable session.
+        # ``authenticated_session`` is only granted by the T1078 automation
+        # script after a live session is actually established.
         provides=[
-            "authenticated_session",
             "credential_access",
         ],
         vulnerability_types=[
@@ -134,8 +129,6 @@ TECHNIQUE_DEFINITIONS: Dict[str, TechniqueDefinition] = {
             "weak_credentials",
             "valid_accounts",
         ],
-        cwe_hints=["CWE-521"],
-        owasp_hints=["A07:2021"],
     ),
     "T1213": TechniqueDefinition(
         technique_id="T1213",
@@ -159,8 +152,6 @@ TECHNIQUE_DEFINITIONS: Dict[str, TechniqueDefinition] = {
             "information_repository_access",
             "database_dump",
         ],
-        cwe_hints=["CWE-200", "CWE-284"],
-        owasp_hints=["A01:2021", "A02:2021"],
     ),
 }
 
@@ -181,6 +172,17 @@ ENVIRONMENTAL_FACT_DEFINITIONS: List[EnvironmentalFactDefinition] = [
     ),
     EnvironmentalFactDefinition(
         vulnerability_types=["nuclei_scan"],
+        provides=[
+            "reachable_web_application",
+            "scanner_observed_web_condition",
+        ],
+    ),
+    # Generic enumeration/discovery is an environmental fact observed by
+    # Obsidian, not adversary ATT&CK behavior. It proves reachability, never
+    # application compromise. Only a purpose-built adversary-attribution
+    # finding (``observed_adversary_active_scanning``) maps to T1595.
+    EnvironmentalFactDefinition(
+        vulnerability_types=["reconnaissance"],
         provides=[
             "reachable_web_application",
             "scanner_observed_web_condition",

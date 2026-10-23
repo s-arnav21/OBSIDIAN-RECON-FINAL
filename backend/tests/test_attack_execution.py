@@ -82,7 +82,7 @@ class AttackExecutionTests(unittest.TestCase):
             command='printf "PWNED:%s" "$OBSIDIAN_TARGET:$OBSIDIAN_ENDPOINT"'
         )
         attempt = execute_planned_attack(plan, finding)
-        self.assertEqual(attempt["status"], "success")
+        self.assertEqual(attempt["status"], "observed")
         self.assertEqual(attempt["method"], "command")
         self.assertEqual(attempt["exit_code"], 0)
         self.assertEqual(attempt["stdout"], "PWNED:http://example.test:/diagnostics")

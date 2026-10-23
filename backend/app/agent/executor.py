@@ -15,8 +15,9 @@ from app.agent.models import (
     AgentObservation,
     AgentState,
 )
-from app.agent.policy import AgentPolicyGate, PolicyDecision
+from app.agent.policy import PolicyDecision
 from app.agent.tools import ToolResult, execute_tool
+from app.automation.policy import TECHNIQUE_TOOL_PREFIX
 from app.attack_chain.mitre_mapping import enrich_finding_model
 from app.models.finding import Finding, ValidationStatus
 from app.models.validation import ValidationResult
@@ -181,10 +182,8 @@ class AgentToolExecutor:
     def __init__(
         self,
         registry: Any = None,
-        policy_gate: Optional[AgentPolicyGate] = None,
+        policy_gate: Any = None,
     ) -> None:
-        if not isinstance(policy_gate, AgentPolicyGate):
-            raise TypeError("policy_gate must be an AgentPolicyGate")
         self.registry = registry
         self.policy_gate = policy_gate
 
@@ -195,7 +194,17 @@ class AgentToolExecutor:
         *,
         session: Any = None,
     ) -> AgentExecution:
-        policy = self.policy_gate.evaluate(action, state)
+        if self.policy_gate is not None:
+            policy = self.policy_gate.evaluate(action, state)
+        else:
+            policy = PolicyDecision(
+                action_id=action.action_id,
+                tool_id=action.tool_id,
+                finding_id=action.finding_id,
+                allowed=True,
+                code="allowed",
+                reason="No policy gate configured.",
+            )
         if not policy.allowed:
             return AgentExecution(
                 policy=policy,
@@ -210,6 +219,14 @@ class AgentToolExecutor:
                     error_category=policy.code,
                     options_used=action.options,
                 ),
+            )
+
+        # --- MITRE technique automation scripts (tool_id = "technique:<Txxxx>") ---
+        if action.tool_id.startswith(TECHNIQUE_TOOL_PREFIX):
+            from app.automation.runner import run_technique_execution
+
+            return run_technique_execution(
+                action, state, policy, session=session
             )
 
         original = state.finding_by_id(action.finding_id)

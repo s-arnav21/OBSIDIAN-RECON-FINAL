@@ -146,7 +146,7 @@ class _RecordingExecutor(AgentToolExecutor):
     def __init__(
         self,
         registry: AgentToolRegistry,
-        policy_gate: AgentPolicyGate,
+        policy_gate: Any = None,
     ) -> None:
         super().__init__(registry, policy_gate)
         self.executions: list[AgentExecution] = []
@@ -171,6 +171,7 @@ class AgentRunService:
         planner: Planner,
         *,
         registry: Optional[AgentToolRegistry] = None,
+        policy_gate: Any = None,
     ) -> None:
         if not isinstance(planner, Planner):
             raise TypeError("planner must implement propose_action")
@@ -178,6 +179,11 @@ class AgentRunService:
         self.registry = registry or AgentToolRegistry()
         if not isinstance(self.registry, AgentToolRegistry):
             raise TypeError("registry must be an AgentToolRegistry")
+        self.policy_gate = (
+            policy_gate
+            if policy_gate is not None
+            else AgentPolicyGate(self.registry)
+        )
 
     @classmethod
     def from_environment(
@@ -200,8 +206,7 @@ class AgentRunService:
             raise TypeError("initial_state must be an AgentState")
 
         recording_planner = _RecordingPlanner(self.planner)
-        policy_gate = AgentPolicyGate(self.registry)
-        recording_executor = _RecordingExecutor(self.registry, policy_gate)
+        recording_executor = _RecordingExecutor(self.registry, self.policy_gate)
         orchestrator = AgentOrchestrator(
             registry=self.registry,
             executor=recording_executor,

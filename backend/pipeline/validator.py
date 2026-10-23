@@ -42,6 +42,24 @@ _STRUCTURAL_CONFIRMED_TYPES = {
     "osint-shared-hosting-detected", "reconnaissance",
 }
 
+# Non-HTTP protocols cannot be re-checked by an HTTP client. Their scanner
+# evidence is preserved instead of being converted into a false ERROR.
+_HTTP_SCHEMES = frozenset({"http", "https"})
+_PROTOCOL_EVIDENCE_KEYS = (
+    "id_output",
+    "banner_excerpt",
+    "banner",
+    "is_root",
+    "is_shell",
+    "authenticated",
+    "anonymous",
+    "login_success",
+    "vulnerable",
+    "confirmed",
+    "version",
+    "service",
+)
+
 # 2xx-discoverable content signals → confirmed if we still get a success.
 _FINDABLE_TYPES = {"content-discovery", "directory-listing", "backup-file-exp"}
 # Header/tech signals → confirmed when the endpoint still serves 2xx-3xx.
@@ -99,6 +117,21 @@ def _validate(f: RawFinding, target: str) -> ValidationResult:
         base.evidence = {"reason": "structural finding"}
         return base
 
+    scheme = _non_http_protocol(f)
+    if scheme is not None:
+        evidence = _scanner_protocol_evidence(f)
+        base.evidence = {"protocol": scheme, "scanner_evidence": evidence}
+        if _has_protocol_evidence(f):
+            base.status = ValidationStatus.CONFIRMED
+            base.confidence = _protocol_confidence(evidence)
+            base.method = "scanner-protocol-evidence"
+        else:
+            base.status = ValidationStatus.MANUAL_REVIEW
+            base.confidence = 0.4
+            base.method = "scanner-protocol-evidence"
+            base.evidence["reason"] = "non-HTTP finding without preserved protocol evidence"
+        return base
+
     # Try to reproduce the trigger via a live HTTP re-check.
     url = f.url or f.matched_at or _base_url(target)
     try:
@@ -149,6 +182,71 @@ def _base_url(target: str) -> str:
     t = target if "://" in target else f"http://{target}"
     parsed = urlparse(t)
     return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _scheme(value: Optional[str]) -> str:
+    """Return the URI scheme, or "" when the value is not scheme-qualified."""
+    if not value or "://" not in value:
+        return ""
+    return value.split("://", 1)[0].lower()
+
+
+def _non_http_protocol(f: RawFinding) -> Optional[str]:
+    """Return the non-HTTP scheme for the finding, else None.
+
+    Scanner findings may address a raw service (`bindshell://`, `ftp://`,
+    `tcp://`, ...). Those can never be re-checked with an HTTP client, so the
+    caller must preserve scanner evidence instead of issuing an HTTP request.
+    """
+    for value in (f.url, f.matched_at):
+        scheme = _scheme(value)
+        if scheme and scheme not in _HTTP_SCHEMES:
+            return scheme
+    return None
+
+
+def _scanner_protocol_evidence(f: RawFinding) -> dict:
+    """Extract the scanner's own protocol evidence, if any was preserved."""
+    raw = f.raw if isinstance(f.raw, dict) else {}
+    evidence = {}
+    for key in _PROTOCOL_EVIDENCE_KEYS:
+        value = raw.get(key)
+        if value is None or value == "" or value == [] or value == {}:
+            continue
+        evidence[key] = value
+    if f.service:
+        evidence.setdefault("service", f.service)
+    if f.port is not None:
+        evidence.setdefault("port", f.port)
+    return evidence
+
+
+def _has_protocol_evidence(f: RawFinding) -> bool:
+    """True only when the scanner preserved an actual protocol observation.
+
+    Service name and port are context, not proof: an FTP finding with only
+    ``service="ftp"`` still needs manual review.
+    """
+    raw = f.raw if isinstance(f.raw, dict) else {}
+    return any(
+        raw.get(key) not in (None, "", [], {})
+        for key in _PROTOCOL_EVIDENCE_KEYS
+    )
+
+
+def _protocol_confidence(evidence: dict) -> float:
+    """Confidence for a preserved-evidence finding.
+
+    A direct positive proof (root shell, successful login, explicit vulnerable
+    flag) is as strong as a live re-check. Banner-only evidence is weaker but
+    still confirmed.
+    """
+    for key in ("is_root", "login_success", "vulnerable", "confirmed", "authenticated"):
+        if evidence.get(key) is True:
+            return 0.95
+    if evidence.get("is_shell") is True:
+        return 0.9
+    return 0.7
 
 
 __all__ = ["validate_findings", "ValidationResult", "ValidationStatus"]

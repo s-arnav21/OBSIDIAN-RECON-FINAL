@@ -44,9 +44,42 @@ Obsidian auto-resolves these binaries at scan time via PATH (then
 | **nuclei** | v3.x (>=3.1 recommended) | template-based vulnerability scanning (`nuclei -u <target> -jsonl -silent`); a dedicated `nuclei-targeted` post skill re-scans discovered paths | Download release from [projectdiscovery/nuclei](https://github.com/projectdiscovery/nuclei/releases) and put the binary on `PATH` |
 | **subfinder + dnsx** *(optional)* | latest | fast subdomain enumeration. Obsidian ships a pure-Python httpx fallback, so these are optional but recommended for coverage | Go tools: `go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest && go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest` |
 | **feroxbuster** *(optional)* | latest | content discovery. A pure-Python httpx wordlist prober is used by default; feroxbuster is a fallback | Release from [epi052/feroxbuster](https://github.com/epi052/feroxbuster/releases) |
+| **sqlmap** | latest | real-tool confirmation for SQL injection validators; the agent `sqlmap-exploit` tool (escalation when the deterministic validator is inconclusive) | `sudo apt install -y sqlmap` |
+| **nikto** | 2.5+ | agent `nikto-scan` tool — web-server misconfiguration / outdated-software scanning | `sudo apt install -y nikto` |
+| **hydra** | 9.x | agent `hydra-brute` tool — credential brute force against an exposed login service | `sudo apt install -y hydra` |
+| **gobuster** | 3.x | agent `gobuster-dir` tool — content/directory enumeration escalation | `sudo apt install -y gobuster` |
+| **ffuf** *(optional)* | 2.x | agent `ffuf-fuzz` tool — configurable web fuzzing with machine-readable hits | Release from [ffuf/ffuf](https://github.com/ffuf/ffuf/releases) |
+| **katana** *(optional)* | 1.x | agent `katana-crawl` tool — web crawling / endpoint discovery | Release from [projectdiscovery/katana](https://github.com/projectdiscovery/katana/releases) |
+| **nfs-common** *(showmount)* | latest | `nfs-probe` network skill — enumerate NFS exports | `sudo apt install -y nfs-common` |
+| **msfconsole** *(optional)* | latest | Metasploit — the `metasploit-*` agent tools (lab/CTF only; not installed by default) | Install Metasploit Framework from [rapid7/metasploit-framework](https://github.com/rapid7/metasploit-framework#installation) |
+| **pymetasploit3** *(optional)* | latest | drives the `metasploit-*` tools over `msfrpcd` instead of `msfconsole` | `pip install pymetasploit3` and run `msfrpcd`; set `MSF_RPC_ENABLED=true` |
+| **OWASP ZAP** *(optional)* | 2.x | `ZapClient` web-testing backend (spider / active scan / alerts) | Run a ZAP daemon and set `ZAP_BASE_URL` |
+| **mitmproxy** *(optional)* | 10+ | capture traffic into the replayable evidence store | `pip install mitmproxy` |
 
 Go tools are picked up automatically from `~/go/bin`. For a governed machine,
 install nmap + nuclei at minimum — they cover the most value.
+
+**One-shot installer.** Rather than installing the table above by hand, run:
+
+```bash
+./scripts/install_tools.sh          # auto: uses apt when root, else user-space
+./scripts/install_tools.sh --user   # force a no-root install into ~/.local/bin
+./scripts/install_tools.sh --verify # just report what resolves
+```
+
+The script is idempotent. In user-space mode it installs sqlmap via `pip` into
+the project venv, gobuster/ffuf/katana as static release binaries, nikto via
+`git clone` (+ local Perl modules), and hydra/showmount by extracting the apt
+`.deb` packages into `~/.local/opt/obsidian-tools` with an `LD_LIBRARY_PATH`
+wrapper — so a host without root still gets the full toolchain. `msfconsole` is
+never installed automatically. Tools are resolved from `PATH`, the active venv,
+`~/go/bin`, `/usr/bin`, `/usr/local/bin`, and `/snap/bin` (see
+`backend/pipeline/scanner/base.py::_resolve_executable`), so `~/.local/bin` is
+picked up automatically.
+
+See [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md) for the full tool/technique
+integration map (what is wired in, the honesty distinctions each integration
+enforces, and what is staged).
 
 ### 1.3 Per-OS quick start
 
@@ -106,6 +139,33 @@ AGENT_LLM_TIMEOUT=15
 > `AGENT_LLM_MODEL` default) in the release that follows training. Watch this
 > section for the update.
 
+### 2.2 Planner training dataset
+
+The repository ships a deterministic JSONL generator and schema validator for
+planner fine-tuning data. Only MITRE ATT&CK Enterprise is represented, covering
+`T1595`, `T1190`, `T1059.004`, `T1082`, `T1078`, `T1213`, `T1548`, and `T1068`.
+
+```bash
+python backend/scripts/generate_planner_dataset.py
+python backend/scripts/validate_planner_dataset.py backend/datasets/planner_training.jsonl
+```
+
+Each record contains `scenario_id`, `step_index`, the exact planner `state`,
+`available_tools`, the exact `output` (`{"decision":"action",...}` or
+`{"decision":"complete","action":null}`), and non-planner `supervision`
+metadata with policy outcomes and rejected candidates. Planner-facing data
+never includes raw evidence, CVSS vectors, CWE/OWASP codes, credentials,
+sessions, commands, or raw request/response state. The examples teach:
+
+- validator-first execution, then escalation to an external tool;
+- capability gating (`application_compromise`, `command_execution`,
+  `local_privilege_escalation`, `authenticated_session`);
+- the honesty split `credential_access != authenticated_session`;
+- `T1595` as observed adversary scanning, never Obsidian's own scans;
+- `root_access` only from real `uid=0` evidence;
+- identifier preservation, same-origin endpoints, deduplication, step budgets,
+  and fail-closed completion.
+
 ---
 
 ## 3. Setup Steps (same for everyone, once prerequisites are done)
@@ -128,7 +188,12 @@ AGENT_LLM_TIMEOUT=15
    alembic upgrade head   # apply migrations 0001→0004
    cd ..
    ```
-4. Start the stack:
+4. Connect the security toolchain (see §1.2). Idempotent; safe to re-run:
+   ```bash
+   ./scripts/install_tools.sh        # apt when root, else user-space (~/.local/bin)
+   ./scripts/install_tools.sh --verify
+   ```
+5. Start the stack:
    ```bash
    docker compose up -d postgres redis backend adminer
    ```

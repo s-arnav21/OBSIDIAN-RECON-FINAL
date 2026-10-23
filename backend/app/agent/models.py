@@ -557,6 +557,10 @@ class AgentState:
         capabilities = list(BASE_CAPABILITIES)
         for finding in enriched:
             if finding.validation_status == ValidationStatus.CONFIRMED:
+                # Only confirmed findings contribute capabilities. A finding's
+                # prerequisites are what the target is assumed to require, not
+                # what we have actually obtained; seeding them would make every
+                # gated technique trivially available.
                 capabilities.extend(finding.provides)
         techniques = [
             finding.mitre_technique_id

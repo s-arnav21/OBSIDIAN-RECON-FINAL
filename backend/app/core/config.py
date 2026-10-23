@@ -49,6 +49,35 @@ class Settings:
     # Agent: maximum bounded steps per run (configurable via .env).
     AGENT_MAX_STEPS: int = int(os.getenv("AGENT_MAX_STEPS", "10"))
 
+    # Automation (MITRE technique scripts): per-script wall-clock budget, the
+    # directory bounded tool output is written to, whether destructive
+    # non-automatic techniques may run without an explicit operator opt-in, and
+    # whether post-exploitation helpers (LinPEAS/WinPEAS) may be fetched from
+    # the internet (default False: use the baked-in cache only).
+    AUTOMATION_TIMEOUT: int = int(os.getenv("AUTOMATION_TIMEOUT", "180"))
+    AUTOMATION_ARTIFACT_DIR: str = os.getenv("AUTOMATION_ARTIFACT_DIR", "")
+    AUTOMATION_ALLOW_NON_AUTOMATIC: bool = _get_bool(
+        "AUTOMATION_ALLOW_NON_AUTOMATIC", False
+    )
+    AUTOMATION_ALLOW_REMOTE_FETCH: bool = _get_bool(
+        "AUTOMATION_ALLOW_REMOTE_FETCH", False
+    )
+
+    # OWASP ZAP REST API (optional web-testing backend). Empty base URL means
+    # "no ZAP" — the adapter reports unavailable instead of guessing a host.
+    ZAP_BASE_URL: str = os.getenv("ZAP_BASE_URL", "")
+    ZAP_API_KEY: str = os.getenv("ZAP_API_KEY", "")
+    ZAP_TIMEOUT: int = int(os.getenv("ZAP_TIMEOUT", "15"))
+
+    # Metasploit RPC (msfrpcd via pymetasploit3). Disabled unless explicitly
+    # enabled AND the optional dependency is importable.
+    MSF_RPC_ENABLED: bool = _get_bool("MSF_RPC_ENABLED", False)
+    MSF_RPC_HOST: str = os.getenv("MSF_RPC_HOST", "127.0.0.1")
+    MSF_RPC_PORT: int = int(os.getenv("MSF_RPC_PORT", "55552"))
+    MSF_RPC_USER: str = os.getenv("MSF_RPC_USER", "msf")
+    MSF_RPC_PASSWORD: str = os.getenv("MSF_RPC_PASSWORD", "")
+    MSF_RPC_SSL: bool = _get_bool("MSF_RPC_SSL", False)
+
     NMAP_SCAN_TIMEOUT: int = int(os.getenv("NMAP_SCAN_TIMEOUT", "900"))
     NMAP_MIN_RATE: int = int(os.getenv("NMAP_MIN_RATE", "500"))
     # Per-host cap for the Phase-1 open-port sweep; a value + firewall that

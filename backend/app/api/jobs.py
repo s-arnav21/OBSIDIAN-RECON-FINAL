@@ -132,8 +132,8 @@ def _spawn_worker(job, *, target_url: str, request: FullScanJobRequest, profile,
             job.set_result(result.to_dict())
 
             # Auto handoff runs in the same worker thread/session after the
-            # scan result is journaled, so the operator never has to open
-            # /exploit, create a session, and start the agent by hand.
+            # scan result is journaled, so the operator never has to open the
+            # attack console, create a session, and start the agent by hand.
             if auto_handoff and allow_exploit:
                 _run_auto_handoff(session, job, result)
         except Exception as exc:  # noqa: BLE001

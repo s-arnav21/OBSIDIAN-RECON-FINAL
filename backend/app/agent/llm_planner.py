@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Dict, Mapping, Optional, Protocol, Sequence
 
 from app.agent.llm_client import LLMClientError
 from app.agent.models import AgentAction
 from app.agent.tools import get_available_tool_catalog
+from app.automation import technique_tool_catalog
+
+
+logger = logging.getLogger(__name__)
 
 
 MAX_PLANNER_PROMPT_BYTES = 128 * 1024
@@ -20,8 +25,25 @@ Select exactly one registered tool for one in-scope finding, or decide the work 
 You may attach targeting options to an action, choosing from the keys a tool advertises in allowed_options (endpoint, http_method, parameter_name, parameter_location). Endpoint options must stay on the trusted origin or be a relative path.
 You are not a payload author: deterministic validators always craft the exploit requests. You control where and how a finding is probed, never the payload itself.
 You may iterate from prior observations: an inconclusive result may be retried on the same finding with different targeting options to drive the attack chain forward, but repeating an identical action is a duplicate and will be denied.
+When a finding's vulnerability type matches an external tool that is listed in available_tools, select that tool directly to drive the finding toward confirmation. Prefer escalating to such a tool after a deterministic validator returns an inconclusive result.
+Never invent a tool. Select only a tool_id that appears in available_tools; a tool mentioned anywhere else is not registered and must not be used.
 Preserve the supplied scan, asset, target, finding, capability, and technique identifiers.
-Return only JSON: either {"decision":"action","action":{...}} or {"decision":"complete","action":null}. Do not return analysis or hidden reasoning.
+
+Return only JSON with exactly two top-level keys: "decision" and "action". Do not return analysis, prose, Markdown fences, or hidden reasoning.
+For completion return exactly: {"decision":"complete","action":null}
+For an action return exactly this shape:
+{"decision":"action","action":{"action_id":"<unique id>","tool_id":"<available tool_id>","scan_id":"<state.scan_id>","asset_id":"<state.asset_id>","finding_id":"<state.findings[].finding_id>","target":"<state.target>","reason":"<short reason>","expected_capabilities":["<capability>"],"options":{"<allowed_option>":"<value>"}}}
+Action object rules:
+- Required keys: action_id, tool_id, scan_id, asset_id, finding_id, target, reason.
+- Optional keys: expected_capabilities (array of strings) and options (object of string values).
+- Do not add any other keys. Fields such as "targeting", "parameters", "expected_provides", "expected_artifacts", "command", "payload", or "url" are rejected.
+- scan_id, asset_id, and target must exactly copy the supplied state values.
+- finding_id must be one of the supplied state.findings values.
+- Options must use only the keys the chosen tool advertises in allowed_options.
+- expected_capabilities must be a subset of state.capabilities: it lists capabilities the action depends on, not capabilities it will gain. Use [] when none are required.
+- parameter_location must be one of: query, form, json, path, header, cookie. http_method must be one of: GET, POST, PUT, PATCH.
+- Only select a tool whose requires_all and requires_any are already met by state.capabilities. If no available tool can advance the finding with the current capabilities, return the completion decision instead.
+
 Deterministic policy and validators independently decide whether an action is permitted and what its validation status is."""
 
 _STATE_FIELDS = (
@@ -242,6 +264,21 @@ def _validate_action_references(
         raise LLMPlanningError("invalid_reference")
 
 
+def _strip_code_fence(content: str) -> str:
+    """Accept a single Markdown code fence around the JSON object.
+
+    Models frequently wrap their JSON in ```json ... ```. That is still the
+    required object; the fence is transport noise, not part of the contract.
+    """
+    text = content.strip()
+    if not text.startswith("```") or not text.endswith("```"):
+        return text
+    lines = text.splitlines()
+    if len(lines) < 2 or lines[-1].strip() != "```":
+        return text
+    return "\n".join(lines[1:-1]).strip()
+
+
 def parse_planner_content(
     content: str,
     *,
@@ -251,6 +288,7 @@ def parse_planner_content(
     """Parse untrusted model output into the existing strict action contract."""
     if not isinstance(content, str):
         raise LLMPlanningError("invalid_schema")
+    content = _strip_code_fence(content)
     try:
         content_size = len(content.encode("utf-8"))
     except UnicodeError:
@@ -300,7 +338,10 @@ class LLMPlanner:
         available_tools: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> Optional[AgentAction]:
         if available_tools is None:
-            available_tools = get_available_tool_catalog()
+            available_tools = [
+                *get_available_tool_catalog(),
+                *technique_tool_catalog(),
+            ]
         safe_state, safe_tools = _sanitized_context(state, available_tools)
         try:
             user_payload = json.dumps(
@@ -316,22 +357,62 @@ class LLMPlanner:
             {"role": "system", "content": SYSTEM_INSTRUCTION},
             {"role": "user", "content": user_payload},
         )
-        try:
-            content = self.client.complete(
-                messages,
-                response_format=AGENT_ACTION_RESPONSE_FORMAT,
-            )
-        except LLMClientError as exc:
-            category = (
-                "provider_timeout"
-                if exc.category == "timeout"
-                else "provider_failure"
-            )
-            raise LLMPlanningError(category) from None
-        except Exception:
-            raise LLMPlanningError("provider_failure") from None
-        return parse_planner_content(
-            content,
-            state=safe_state,
-            available_tools=safe_tools,
+        retry_messages = messages + (
+            {
+                "role": "user",
+                "content": (
+                    "The previous response was rejected. Return only one JSON "
+                    "object with top-level keys \"decision\" and \"action\". "
+                    "If acting, \"action\" must contain exactly action_id, "
+                    "tool_id, scan_id, asset_id, finding_id, target, reason, "
+                    "and optionally expected_capabilities and options. Use "
+                    "only a tool_id from available_tools. No prose or code fence."
+                ),
+            },
         )
+        last_parse_error: Optional[LLMPlanningError] = None
+        for attempt in range(2):
+            try:
+                content = self.client.complete(
+                    messages if attempt == 0 else retry_messages,
+                    response_format=AGENT_ACTION_RESPONSE_FORMAT,
+                )
+            except LLMClientError as exc:
+                config = getattr(self.client, "config", None)
+                logger.warning(
+                    "Agent planner provider failure: category=%s base_url=%s "
+                    "model=%s",
+                    exc.category,
+                    getattr(config, "base_url", "unknown"),
+                    getattr(config, "model", "unknown"),
+                )
+                category = (
+                    "provider_timeout"
+                    if exc.category == "timeout"
+                    else "provider_failure"
+                )
+                raise LLMPlanningError(category) from None
+            except Exception as exc:
+                logger.warning(
+                    "Agent planner client error: %s",
+                    type(exc).__name__,
+                )
+                raise LLMPlanningError("provider_failure") from None
+            try:
+                return parse_planner_content(
+                    content,
+                    state=safe_state,
+                    available_tools=safe_tools,
+                )
+            except LLMPlanningError as exc:
+                # Exactly one bounded retry, and only for malformed output.
+                # Authority errors (unknown tool, changed references) would
+                # not improve on retry and must fail closed immediately.
+                if attempt == 0 and exc.category in {
+                    "invalid_json",
+                    "invalid_schema",
+                }:
+                    last_parse_error = exc
+                    continue
+                raise
+        raise last_parse_error or LLMPlanningError("invalid_json")

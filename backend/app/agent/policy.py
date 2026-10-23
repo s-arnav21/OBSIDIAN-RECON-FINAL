@@ -11,6 +11,7 @@ from app.agent.tools import (
     UnknownAgentToolError,
     normalize_vulnerability_type,
 )
+from app.models.finding import ValidationStatus
 from app.scanning.scope import ReconScopeError, normalize_origin
 
 
@@ -167,6 +168,14 @@ class AgentPolicyGate:
                 code=PolicyDecisionCode.DENIED_WRONG_FINDING,
                 reason="The finding does not belong to the trusted scan context.",
             )
+        # MITRE technique scripts ("technique:<Txxxx>") are evaluated by the
+        # automation layer, which enforces the strict technique prerequisite
+        # graph. Returns None for ordinary registered tools.
+        from app.automation.policy import evaluate_technique_action
+
+        technique_decision = evaluate_technique_action(action, state, finding)
+        if technique_decision is not None:
+            return technique_decision
         try:
             tool = self.registry.require(action.tool_id)
         except UnknownAgentToolError:
@@ -239,7 +248,17 @@ class AgentPolicyGate:
                 code=PolicyDecisionCode.DENIED_PREREQUISITE,
                 reason="The action was proposed against unavailable capabilities.",
             )
-        all_groups = (set(tool.requires_all), set(finding.effective_requires_all))
+        # A confirmed finding has already exercised the vulnerability, so its
+        # own assumed prerequisites describe how it was reached — not access the
+        # agent must hold again. Unconfirmed findings stay gated by them.
+        finding_is_confirmed = (
+            finding.validation_status == ValidationStatus.CONFIRMED
+        )
+        all_groups = [set(tool.requires_all)]
+        any_groups = [tuple(tool.requires_any)]
+        if not finding_is_confirmed:
+            all_groups.append(set(finding.effective_requires_all))
+            any_groups.append(tuple(finding.effective_requires_any))
         if any(not group.issubset(available) for group in all_groups):
             return _decision(
                 action,
@@ -247,7 +266,7 @@ class AgentPolicyGate:
                 code=PolicyDecisionCode.DENIED_PREREQUISITE,
                 reason="Required capabilities have not been established.",
             )
-        for group in (tool.requires_any, tuple(finding.effective_requires_any)):
+        for group in any_groups:
             if group and not (set(group) & available):
                 return _decision(
                     action,

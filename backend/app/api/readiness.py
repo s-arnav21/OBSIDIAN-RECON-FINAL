@@ -40,11 +40,15 @@ def _database_status(session: Optional[Session]) -> str:
     return "ready"
 
 
-def _scanner_status(environment_name: str) -> str:
+def _scanner_status(environment_name: str, binary_name: str) -> str:
     configured = os.getenv(environment_name, "").strip()
-    if not configured:
+    # Prefer the explicit env path, but fall back to PATH resolution so tools
+    # baked into the image (nmap/nuclei in /usr/bin & /usr/local/bin) are
+    # reported correctly even when the env override is left empty.
+    path = configured or shutil.which(binary_name)
+    if not path:
         return "not_configured"
-    return "ready" if shutil.which(configured) else "unavailable"
+    return "ready" if shutil.which(path) else "unavailable"
 
 
 @router.get("/readiness")
@@ -54,8 +58,8 @@ def readiness(
     components = {
         "backend": {"status": "ready"},
         "postgresql": {"status": _database_status(session)},
-        "nmap": {"status": _scanner_status("RECON_NMAP_PATH")},
-        "nuclei": {"status": _scanner_status("RECON_NUCLEI_PATH")},
+        "nmap": {"status": _scanner_status("RECON_NMAP_PATH", "nmap")},
+        "nuclei": {"status": _scanner_status("RECON_NUCLEI_PATH", "nuclei")},
     }
     overall = (
         "ready"

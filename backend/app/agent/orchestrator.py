@@ -14,6 +14,25 @@ from app.agent.models import (
     AgentStatus,
 )
 from app.agent.tools import AgentToolRegistry, get_available_tool_catalog
+from app.automation import technique_tool_catalog
+
+
+def _planner_tool_catalog() -> list:
+    """Available tools plus the registered MITRE technique scripts.
+
+    The registry view is used rather than the flat tool catalog because the
+    planner needs each tool's ``requires_*``, ``provides``, ``allowed_options``
+    and ``automatic_allowed`` fields to reason about capability gating.
+    """
+    available = {
+        tool["tool_id"] for tool in get_available_tool_catalog()
+    }
+    registry_tools = [
+        tool
+        for tool in AgentToolRegistry().planner_catalog()
+        if tool.get("tool_id") in available
+    ]
+    return [*registry_tools, *technique_tool_catalog()]
 
 
 @runtime_checkable
@@ -105,13 +124,21 @@ class AgentOrchestrator:
             try:
                 proposal = self.planner.propose_action(
                     state.to_dict(),
-                    get_available_tool_catalog(),
+                    _planner_tool_catalog(),
                 )
-            except Exception:
+            except Exception as exc:
+                # Preserve the safe, bounded failure category so the console can
+                # distinguish an unreachable provider from a bad model reply.
+                category = getattr(exc, "category", None)
+                reason = (
+                    f"planner_error:{category}"
+                    if isinstance(category, str) and category
+                    else "planner_error"
+                )
                 return replace(
                     state,
                     status=AgentStatus.FAILED,
-                    terminal_reason="planner_error",
+                    terminal_reason=reason,
                 )
             if proposal is None:
                 return replace(

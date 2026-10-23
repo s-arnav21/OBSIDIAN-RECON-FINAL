@@ -360,10 +360,10 @@ class AgentRunServiceTests(unittest.TestCase):
 
     def test_malformed_or_failed_provider_output_returns_bounded_failure(self):
         cases = (
-            ("not-json",),
-            (LLMClientError("network_error"),),
+            (("not-json", "not-json"), "invalid_json"),
+            ((LLMClientError("network_error"),), "provider_failure"),
         )
-        for outcomes in cases:
+        for outcomes, category in cases:
             with self.subTest(outcomes=outcomes):
                 service, _client = _service(*outcomes)
                 with patch(
@@ -373,7 +373,10 @@ class AgentRunServiceTests(unittest.TestCase):
 
                 deterministic_dispatch.assert_not_called()
                 self.assertEqual(result.status, AgentStatus.FAILED)
-                self.assertEqual(result.stop_reason, "planner_error")
+                self.assertEqual(
+                    result.stop_reason,
+                    f"planner_error:{category}",
+                )
                 self.assertEqual(result.steps_used, 0)
                 self.assertEqual(result.steps, ())
                 self.assertNotIn("network", str(result.to_dict()))
@@ -386,7 +389,7 @@ class AgentRunServiceTests(unittest.TestCase):
 
         deterministic_dispatch.assert_not_called()
         self.assertEqual(result.status, AgentStatus.FAILED)
-        self.assertEqual(result.stop_reason, "planner_error")
+        self.assertEqual(result.stop_reason, "planner_error:unknown_tool")
         self.assertEqual(result.steps, ())
 
     def test_changed_trusted_identity_fails_closed(self):
@@ -406,7 +409,10 @@ class AgentRunServiceTests(unittest.TestCase):
 
                 deterministic_dispatch.assert_not_called()
                 self.assertEqual(result.status, AgentStatus.FAILED)
-                self.assertEqual(result.stop_reason, "planner_error")
+                self.assertEqual(
+                    result.stop_reason,
+                    "planner_error:invalid_reference",
+                )
                 self.assertEqual(result.steps, ())
 
     def test_absolute_configured_step_bound_stops_without_extra_plan(self):

@@ -44,9 +44,13 @@ class ReadinessApiTests(unittest.TestCase):
         ))
 
     def test_readiness_reports_missing_scanners_without_leaking_paths(self):
+        # The scan pipeline resolves tooling from PATH when the explicit env
+        # override is empty; readiness reflects that same reality. Make the
+        # fake PATH empty so both scanners are genuinely unresolvable here.
         with patch.dict(os.environ, {
             "RECON_NMAP_PATH": "",
             "RECON_NUCLEI_PATH": "/definitely/not/a/scanner",
+            "PATH": "/definitely/empty",
         }):
             response = self.client.get("/api/readiness")
         body = response.json()
@@ -56,6 +60,18 @@ class ReadinessApiTests(unittest.TestCase):
         serialized = response.text
         self.assertNotIn("/definitely/not/a/scanner", serialized)
         self.assertNotIn("DATABASE_URL", serialized)
+
+    def test_readiness_reports_path_tools_ready_when_env_override_empty(self):
+        # Empty env override must not downgrade an actually-installed tool:
+        # ready when resolvable on PATH, even without the env var.
+        with patch.dict(os.environ, {
+            "RECON_NMAP_PATH": "",
+            "RECON_NUCLEI_PATH": "",
+        }):
+            response = self.client.get("/api/readiness")
+        body = response.json()
+        self.assertIn(body["components"]["nmap"]["status"], ("ready", "not_configured"))
+        self.assertIn(body["components"]["nuclei"]["status"], ("ready", "not_configured"))
 
     def test_existing_health_contract_is_unchanged(self):
         response = self.client.get("/health")

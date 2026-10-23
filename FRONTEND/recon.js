@@ -10,6 +10,40 @@ let scanName = null;
 let pollHandoffTimer = null;
 let handoffJobId = null;
 
+const phaseLabels = {
+  recon: 'Discovery',
+  network: 'Network',
+  web: 'Web surface',
+  scanner: 'Scanners',
+  exploit: 'Exploit probes',
+  post: 'Post-processing',
+  report: 'Reporting',
+  chain: 'Validation and finalize',
+};
+
+const iconPaths = {
+  done: ['M5.5 12.5 9.5 16.5 18.5 7.5'],
+  failed: ['M7 7l10 10', 'M17 7 7 17'],
+  running: ['M12 4.5a7.5 7.5 0 1 1-7.5 7.5', 'M4.5 7.5v4h4'],
+  skipped: ['M6 12h12'],
+  cancelled: ['M8 8l8 8', 'M16 8l-8 8'],
+  pending: ['M12 7v5l3 2', 'M12 3.5a8.5 8.5 0 1 1-8.5 8.5A8.5 8.5 0 0 1 12 3.5Z'],
+};
+
+function iconNode(name, label) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('class', 'icon icon-sm');
+  svg.setAttribute('aria-hidden', 'true');
+  (iconPaths[name] || iconPaths.pending).forEach((d) => {
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', d);
+    svg.appendChild(path);
+  });
+  if (label) svg.setAttribute('data-label', label);
+  return svg;
+}
+
 /* ---------- formatting ---------- */
 function fmtDur(ms) {
   if (ms == null) return '-';
@@ -40,14 +74,50 @@ function el(tag, cls, text) {
 /* ---------- dots & buttons ---------- */
 function setDot(state) {
   $('statusDot').setAttribute('data-state', state);
+  const labels = { idle: 'Ready', working: 'Scanning', scanning: 'Scanning', ok: 'Complete', err: 'Attention' };
+  if ($('sessionState')) $('sessionState').textContent = labels[state] || 'Ready';
 }
 function setBusy(busy) {
   $('runBtn').disabled = busy;
+  $('targetInput').disabled = busy;
+  $('scanNameInput').disabled = busy;
+  $('authCheck').disabled = busy;
+  if ($('autoHandoffCheck')) $('autoHandoffCheck').disabled = busy || $('devScopedCheck').checked;
+  $('devScopedCheck').disabled = busy;
+  document.body.classList.toggle('is-scanning', busy);
 }
 function statusLine(msg, cls) {
   const s = $('statusLine');
   s.className = 'statusline' + (cls ? ' ' + cls : '');
   s.textContent = msg;
+}
+
+/* ---------- theme and shell context ---------- */
+function setTheme(theme, persist) {
+  const root = document.documentElement;
+  root.classList.add('theme-transitioning');
+  root.dataset.theme = theme;
+  if (persist) localStorage.setItem('obsidian-theme', theme);
+  const toggle = $('themeToggle');
+  if (toggle) {
+    const dark = theme === 'dark';
+    toggle.setAttribute('aria-pressed', String(dark));
+    toggle.setAttribute('aria-label', dark ? 'Switch to light theme' : 'Switch to dark theme');
+    toggle.title = dark ? 'Use dark theme' : 'Use light theme';
+  }
+  window.setTimeout(() => root.classList.remove('theme-transitioning'), 320);
+}
+
+function updateAuthorizationState() {
+  const authorized = $('authCheck').checked;
+  const tag = $('authTag');
+  tag.dataset.authorized = String(authorized);
+  tag.querySelector('#authTagText').textContent = authorized ? 'Authorized' : 'Authorization required';
+}
+
+function updateTargetContext() {
+  const value = $('targetInput').value.trim();
+  $('targetContext').textContent = value || 'Not configured';
 }
 
 /* ---------- findings narrative ---------- */
@@ -114,9 +184,6 @@ function findingDesc(f) {
   // Canonical findings carry an evidence dict.
   if (typeof f.evidence === 'object' && f.evidence) {
     const t = f.evidence.title || f.evidence.reason || f.evidence.description;
-    const url = f.evidence.url || f.evidence.recheck_status
-      ? (f.evidence.url || f.endpoint || '')
-      : '';
     if (f.evidence.url && t) { parts.push(t + ' @ ' + f.evidence.url); return parts.join(' '); }
     if (f.evidence.url) { parts.push(f.evidence.url); return parts.join(' '); }
     if (t) { parts.push(t); return parts.join(' '); }
@@ -152,6 +219,8 @@ function setResultsMode(mode) {
   toggle.hidden = false;
   liveBtn.classList.toggle('active', mode === 'live');
   sumBtn.classList.toggle('active', mode === 'summary');
+  liveBtn.setAttribute('aria-pressed', String(mode === 'live'));
+  sumBtn.setAttribute('aria-pressed', String(mode === 'summary'));
   sumBtn.disabled = !summaryReady;
   $('liveView').hidden = (mode !== 'live');
   $('resultView').hidden = (mode !== 'summary');
@@ -181,7 +250,7 @@ function showError(msg) {
   clearError();
   const err = document.createElement('div');
   err.className = 'error-card';
-  err.textContent = 'scan failed: ' + msg;
+  err.textContent = 'scan failed: ' + (typeof msg === 'string' ? msg : 'unknown error');
   $('results').insertBefore(err, !$('liveView').hidden ? $('liveView') : $('resultView'));
 }
 
@@ -221,7 +290,7 @@ function setProgress(done, total, state) {
   const bar = $('progressBar');
   bar.className = 'progress-fill' + (state === 'running' ? ' live' : ' ' + state);
   const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : (state === 'running' ? 0 : 100);
-  bar.style.width = pct + '%';
+  bar.style.transform = 'scaleX(' + (pct / 100) + ')';
   $('progressLabel').textContent = (state === 'running')
     ? done + ' / ' + total + ' · ' + pct + '%'
     : pct + '%';
@@ -241,17 +310,42 @@ function renderJournal(steps) {
   const ordered = (steps || []).slice().sort(sortBySeq);
 
   list.innerHTML = '';
+  let activePhase = null;
   ordered.forEach((s) => {
-    const tick = el('div', 'tick ' + (s.status || ''));
-    tick.appendChild(el('span', 'mark', tickMark(s)));
+    const phase = s.phase || 'pipeline';
+    if (phase !== activePhase) {
+      activePhase = phase;
+      list.appendChild(el('div', 'tick-divider', phaseLabels[phase] || phase.replace(/[-_]/g, ' ')));
+    }
+    const tick = el('div', 'tick ' + (s.status || 'pending'));
+    tick.setAttribute('role', 'listitem');
+    const mark = el('span', 'mark', '');
+    mark.appendChild(iconNode(tickIconName(s.status)));
+    tick.appendChild(mark);
     let label = s.label;
     const fc = s.findings_count != null ? s.findings_count : (s.findings || 0);
     if (fc) label += ' · ' + fc + ' finding' + (fc === 1 ? '' : 's');
     if (s.error) label += ' — ' + s.error;
+    const spokenState = (s.status || 'pending').replace(/[-_]/g, ' ');
+    tick.setAttribute('aria-label', label + ', ' + spokenState);
     tick.appendChild(el('span', 'tlabel', label));
     if (s.duration_ms != null) tick.appendChild(el('span', 'ttime', (s.duration_ms / 1000).toFixed(1) + 's'));
     list.appendChild(tick);
   });
+  const running = ordered.filter((s) => s.status === 'running');
+  const current = running[running.length - 1];
+  const finished = ordered.filter((s) => ['done', 'failed', 'skipped', 'cancelled'].includes(s.status)).length;
+  const hasFailed = ordered.some((s) => s.status === 'failed');
+  const hasCancelled = ordered.some((s) => s.status === 'cancelled');
+  const fullyResolved = ordered.length > 0 && finished === ordered.length;
+  $('currentOperation').textContent = current
+    ? current.label
+    : (fullyResolved
+      ? (hasCancelled ? 'Pipeline cancelled' : (hasFailed ? 'Completed with issues' : 'Pipeline complete'))
+      : (ordered.length ? 'Pipeline queued' : 'Waiting for a scan'));
+  $('journalFoot').textContent = ordered.length
+    ? finished + ' of ' + ordered.length + ' operations resolved'
+    : 'Idle · no active job';
   if (nearBottom) box.scrollTop = box.scrollHeight;
 }
 
@@ -261,14 +355,8 @@ function sortBySeq(a, b) {
   return as - bs;
 }
 
-function tickMark(s) {
-  switch (s.status) {
-    case 'done': return '✓';
-    case 'failed': return '✗';
-    case 'running': return '›';
-    case 'skipped': return '·';
-    default: return '○';
-  }
+function tickIconName(status) {
+  return iconPaths[status] ? status : 'pending';
 }
 
 /* ---------- live findings ---------- */
@@ -296,7 +384,9 @@ function setLivePinned(v) {
   const p = $('livePinned');
   if (p) {
     p.classList.toggle('paused', !v);
-    p.textContent = v ? 'following newest' : 'paused — not following (click to resume)';
+    const label = p.querySelector('span:last-child');
+    if (label) label.textContent = v ? 'Following newest' : 'Following paused';
+    p.setAttribute('aria-pressed', String(!v));
   }
 }
 
@@ -332,17 +422,17 @@ function appendLiveFindings(rows) {
     const sev = sevClass(f.severity);
     liveSev[sev] = (liveSev[sev] || 0) + 1;
     const card = el('div', 'lf-card border-' + sev + ' lf-fresh');
-    card.appendChild(el('span', 'sev-chip ' + sev, sev.toUpperCase().slice(0, 2)));
+    card.appendChild(el('span', 'sev-chip ' + sev, sev));
     const body = el('div', 'lf-body', '');
     body.appendChild(el('div', 'lf-desc', findingDesc(f)));
     const meta = el('div', 'lf-meta', '');
-    meta.appendChild(el('span', 'host', esc(f.host || f.target || '') + ' '));
-    if (f.port != null) meta.appendChild(el('span', '', ':' + esc(f.port) + (f.service ? '/' + esc(f.service) : '') + ' '));
+    meta.appendChild(el('span', 'host', String(f.host || f.target || '') + ' '));
+    if (f.port != null) meta.appendChild(el('span', '', ':' + String(f.port) + (f.service ? '/' + String(f.service) : '') + ' '));
     if (f.source) meta.appendChild(el('span', '', '· ' + f.source));
-    if (f.url || f.endpoint) meta.appendChild(el('span', '', '· ' + esc(f.url || f.endpoint)));
+    if (f.url || f.endpoint) meta.appendChild(el('span', '', '· ' + String(f.url || f.endpoint)));
     body.appendChild(meta);
     if (f.evidence && Object.keys(f.evidence).length) {
-      body.appendChild(el('div', 'lf-raw', esc(JSON.stringify(f.evidence).slice(0, 500))));
+      body.appendChild(el('div', 'lf-raw', JSON.stringify(f.evidence).slice(0, 500)));
     }
     card.appendChild(body);
     const group = lfSeverityGroup(feed, sev);
@@ -360,6 +450,29 @@ function appendLiveFindings(rows) {
 let activeJobId = null;
 let seenLiveKeys = new Set();
 
+function updateDevScopedState() {
+  const checked = $('devScopedCheck').checked;
+  $('devScopedWarning').hidden = !checked;
+  if (checked) {
+    $('autoHandoffCheck').checked = false;
+    $('authCheck').checked = false;
+    updateAuthorizationState();
+  }
+  $('autoHandoffCheck').disabled = checked;
+}
+
+async function loadDevScopedSettings() {
+  try {
+    const settings = await postJSON('/api/scans/dev-scoped-settings', null, 'GET');
+    $('devScopedControl').hidden = !settings.enabled;
+    if (!settings.enabled) $('devScopedCheck').checked = false;
+  } catch (_) {
+    $('devScopedControl').hidden = true;
+    $('devScopedCheck').checked = false;
+  }
+  updateDevScopedState();
+}
+
 function scanPayload() {
   const url = $('targetInput').value.trim();
   if (!url) { statusLine('target URL is required', 'err'); return null; }
@@ -373,7 +486,7 @@ function scanPayload() {
     target_url: url,
     authorized: $('authCheck').checked,
     name: scanName,
-    auto_handoff: $('autoHandoffCheck') ? $('autoHandoffCheck').checked : false,
+    auto_handoff: $('devScopedCheck').checked ? false : $('autoHandoffCheck').checked,
   };
 }
 
@@ -384,7 +497,11 @@ async function postJSON(path, body, method) {
     body: body == null ? undefined : JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error((data && (data.detail || data.error)) || ('HTTP ' + res.status));
+  if (!res.ok) {
+    const detail = data && (data.detail || data.error);
+    const msg = typeof detail === 'string' ? detail : ('HTTP ' + res.status);
+    throw new Error(msg);
+  }
   return data;
 }
 
@@ -417,9 +534,6 @@ async function startScan() {
     setProgress(0, 0, 'failed');
     showError(err.message);
     statusLine(err.message, 'err');
-    $('stopBtn').hidden = true;
-    setBusy(false);
-    return;
   }
 
   activeJobId = job.id;
@@ -480,7 +594,7 @@ function finalizeJob(job) {
     setDot('err');
     setProgress(job.done || 0, job.total || 0, 'failed');
     showError(job.error || 'scan failed');
-    statusLine('scan failed: ' + (job.error || 'unknown'), 'err');
+    statusLine('scan failed: ' + (typeof job.error === 'string' ? job.error : 'unknown'), 'err');
     return;
   }
   if (job.status === 'cancelled') {
@@ -511,22 +625,49 @@ async function cancelScan() {
     statusLine('stopping scan…', 'warn');
     await postJSON('/api/scans/jobs/' + activeJobId + '/cancel', {});
   } catch (err) {
-    statusLine('stop failed: ' + err.message, 'err');
+    statusLine('stop failed: ' + (typeof err.message === 'string' ? err.message : 'unknown'), 'err');
   }
 }
 
 /* ---------- completed results ---------- */
 function storeScanSession(data) {
+  const findings = data.findings || [];
+  const devScoped = data.mode === 'scoped_development_test';
   sessionStorage.setItem('obsidian_scan', JSON.stringify({
     scan_id: data.scan_id,
     scan_name: scanName || data.scan_id,
     target_url: data.target_url || '',
+    mode: data.mode,
+    findings: findings.map(f => ({
+      finding_id: f.finding_id,
+      severity: f.severity,
+      vulnerability_type: f.vulnerability_type,
+      host: f.host,
+      port: f.port,
+      url: f.url,
+      endpoint: f.endpoint,
+      source: f.source,
+      description: f.description,
+      raw: f.raw,
+    })),
+    services: devScoped ? [] : (data.services || []).map(s => ({
+      port: s.port,
+      protocol: s.protocol,
+      service_name: s.service_name,
+      product: s.product,
+      version: s.version,
+    })),
+    skill_runs: data.skill_runs || [],
+    triage: data.triage || {},
+    validation: data.validation || {},
+    groups: data.groups || [],
   }));
 }
 
 function renderResults(data, elapsedMs, handoff, jobId) {
   const findings = data.findings || [];
-  const eligible = findings.filter((f) => ['confirmed', 'manual_review'].includes(f.validation_status));
+  const devScoped = data.mode === 'scoped_development_test';
+  const eligible = devScoped ? [] : findings.filter((f) => ['confirmed', 'manual_review'].includes(f.validation_status));
 
   setLivePinned(false);
 
@@ -534,8 +675,11 @@ function renderResults(data, elapsedMs, handoff, jobId) {
   $('metaTarget').textContent = data.target_url || '—';
   $('metaCanonical').textContent = data.target_url || '—';
   $('metaDuration').textContent = fmtDur(elapsedMs);
-  $('metaFindings').textContent = findings.length + ' (' + eligible.length + ' eligible for exploitation)';
+  $('metaFindings').textContent = devScoped
+    ? findings.length + ' scoped observation' + (findings.length === 1 ? '' : 's')
+    : findings.length + ' (' + eligible.length + ' eligible for exploitation)';
 
+  renderServices(devScoped ? data.services : []);
   renderSevBar(findings);
   renderPills(data.skill_runs || []);
   renderGroups(findings);
@@ -544,12 +688,13 @@ function renderResults(data, elapsedMs, handoff, jobId) {
   setResultsMode('summary');
   document.getElementById('results').scrollIntoView({ block: 'start' });
 
-  if (findings.length) {
+  $('toExploitCard').hidden = devScoped || !findings.length;
+  if (findings.length && !devScoped) {
     $('toExploitCard').hidden = false;
     const eligibleN = eligible.length;
     const strong = eligibleN ? eligibleN + ' finding' + (eligibleN === 1 ? '' : 's') + ' ready for exploitation.' : 'Scan complete — findings are ready to analyze.';
     $('toExploitCard').querySelector('strong').textContent = strong;
-    $('toExploitBtn').textContent = eligibleN ? 'Attack these →' : 'Open Exploit Console →';
+    $('toExploitBtn').textContent = eligibleN ? 'Review in exploitation' : 'Open exploitation';
     $('toExploitCard').querySelector('.confirm-copy').textContent = eligibleN
       ? eligibleN + ' eligible target' + (eligibleN === 1 ? '' : 's') + ' passed forward to phase 2'
       : 'Open the exploit console to analyze the full recon picture';
@@ -562,7 +707,7 @@ function renderResults(data, elapsedMs, handoff, jobId) {
   renderHandoff(data, handoff, jobId);
 }
 
-/* ---------- automatic recon → exploit handoff ---------- */
+/* ---------- automatic recon to exploit handoff ---------- */
 function renderHandoff(data, handoff, jobId) {
   const card = $('handoffCard');
   if (!card) return;
@@ -583,7 +728,7 @@ function renderHandoff(data, handoff, jobId) {
   if (handoff.status === 'running') {
     title.textContent = 'Automatic handoff in progress…';
     copy.textContent = 'Creating the attack session and starting the LLM agent on eligible findings. This can take several minutes.';
-    btn.textContent = 'Open exploit console now →';
+    btn.textContent = 'Open exploitation';
     // The scan result is in, but the handoff thread keeps running — keep
     // polling the job until it reaches a terminal handoff state.
     handoffJobId = jobId || handoffJobId;
@@ -597,7 +742,7 @@ function renderHandoff(data, handoff, jobId) {
   if (handoff.status === 'completed') {
     title.textContent = 'Automatic handoff complete';
     copy.textContent = 'Attack session ready — LLM agent finished (' + (handoff.agent_status || 'done') + ', ' + (handoff.steps_used || 0) + ' steps). Redirecting to the exploit console…';
-    btn.textContent = 'Open attack session →';
+    btn.textContent = 'Open attack session';
     window.__handoffTimer = setTimeout(() => { window.location.href = '/exploit'; }, 1800);
     return;
   }
@@ -605,13 +750,17 @@ function renderHandoff(data, handoff, jobId) {
   if (handoff.status === 'skipped') {
     title.textContent = 'Automatic handoff skipped';
     copy.textContent = handoff.reason || handoff.message || 'No automatic handoff was performed.';
-    btn.textContent = 'Open exploit console →';
+    btn.textContent = 'Open exploitation';
+    // The scan itself finished, so carry it to the exploit console regardless of
+    // whether an auto session could be created.
+    window.__handoffTimer = setTimeout(() => { window.location.href = '/exploit'; }, 1800);
     return;
   }
 
   title.textContent = 'Automatic handoff failed';
   copy.textContent = handoff.error || handoff.message || 'The automatic handoff errored.';
-  btn.textContent = 'Open exploit console →';
+  btn.textContent = 'Open exploitation';
+  window.__handoffTimer = setTimeout(() => { window.location.href = '/exploit'; }, 1800);
 }
 
 async function pollHandoffAfterScan() {
@@ -630,6 +779,32 @@ async function pollHandoffAfterScan() {
   } catch (_) {
     // Job may have been pruned; leave the card in its in-progress state.
   }
+}
+
+function renderServices(services) {
+  const section = $('serviceObservations');
+  section.innerHTML = '';
+  const byPort = new Map();
+  if (Array.isArray(services)) {
+    services.forEach((service) => {
+      if (!service || !Number.isInteger(service.port)) return;
+      const key = String(service.port) + '/' + String(service.protocol || '');
+      const existing = byPort.get(key);
+      if (!existing || (existing.source !== 'nmap' && service.source === 'nmap')) byPort.set(key, service);
+    });
+  }
+  section.hidden = byPort.size === 0;
+  if (!byPort.size) return;
+
+  section.appendChild(el('h3', '', 'Observed network services'));
+  section.appendChild(el('p', 'triage-note', 'Open services are observations, not confirmed vulnerabilities.'));
+  const list = el('div', 'service-list');
+  [...byPort.values()].sort((a, b) => a.port - b.port).forEach((service) => {
+    const details = [service.service_name, service.product, service.version].filter(Boolean).join(' · ');
+    const label = String(service.port) + (service.protocol ? '/' + service.protocol : '');
+    list.appendChild(el('div', 'service-item mono', label + (details ? ' — ' + details : '')));
+  });
+  section.appendChild(list);
 }
 
 function renderSevBar(findings) {
@@ -661,7 +836,11 @@ function renderPills(skillRuns) {
     const pill = el('div', 'pill ' + (s.success ? 'ran' : 'failed'));
     pill.appendChild(el('span', 'pname', s.skill));
     if (s.success && s.findings != null) pill.appendChild(el('span', 'pcount', String(s.findings)));
-    if (!s.success) pill.appendChild(el('span', '', '✗'));
+    if (!s.success) {
+      const failedMark = el('span', 'pill-mark', '');
+      failedMark.appendChild(iconNode('failed'));
+      pill.appendChild(failedMark);
+    }
     pill.title = s.error || (s.success ? 'ok' : 'failed');
     wrap.appendChild(pill);
   });
@@ -683,8 +862,7 @@ function renderGroups(findings) {
   sevOrder.forEach((sev) => {
     if (!bucket[sev].length) return;
     const sec = el('div', '', '');
-    const h = el('div', '', sev.toUpperCase());
-    h.style.cssText = 'font-family:var(--font-mono);font-size:11px;font-weight:700;letter-spacing:1px;color:var(--ui-05);margin:16px 0 8px;';
+    const h = el('div', 'severity-heading', sev + ' findings');
     sec.appendChild(h);
     bucket[sev].forEach((f) => sec.appendChild(findingEl(f)));
     wrap.appendChild(sec);
@@ -697,8 +875,8 @@ function findingEl(f) {
   if (sevClass(f.severity) === 'critical' || sevClass(f.severity) === 'high') det.open = true;
 
   const summary = document.createElement('summary');
-  summary.appendChild(el('span', 'chev', '▶'));
-  summary.appendChild(el('span', 'sev-chip ' + sevClass(f.severity), '1'));
+  summary.appendChild(el('span', 'chev', ''));
+  summary.appendChild(el('span', 'sev-chip ' + sevClass(f.severity), sevClass(f.severity)));
   summary.appendChild(el('span', 'gdesc', findingDesc(f)));
   summary.appendChild(el('span', 'scanner-tag', f.source || f.validator_id || ''));
   det.appendChild(summary);
@@ -761,6 +939,12 @@ if ($('stopBtn')) $('stopBtn').addEventListener('click', cancelScan);
 $('targetInput').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') startScan();
 });
+$('targetInput').addEventListener('input', updateTargetContext);
+$('authCheck').addEventListener('change', updateAuthorizationState);
+$('themeToggle').addEventListener('click', () => {
+  const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  setTheme(next, true);
+});
 $('viewLiveBtn').addEventListener('click', () => setResultsMode('live'));
 $('viewSummaryBtn').addEventListener('click', () => setResultsMode('summary'));
 
@@ -772,6 +956,36 @@ window.addEventListener('scroll', () => {
 }, { passive: true });
 const pinEl = $('livePinned');
 if (pinEl) pinEl.addEventListener('click', () => {
-  setLivePinned(true);
-  scrollLiveToBottom();
+  setLivePinned(!livePinned);
+  if (livePinned) scrollLiveToBottom();
 });
+
+const colorScheme = window.matchMedia('(prefers-color-scheme: dark)');
+colorScheme.addEventListener('change', (event) => {
+  if (!localStorage.getItem('obsidian-theme')) setTheme(event.matches ? 'dark' : 'light', false);
+});
+
+setTheme(document.documentElement.dataset.theme || 'light', false);
+updateAuthorizationState();
+updateTargetContext();
+
+const storedScan = sessionStorage.getItem('obsidian_scan');
+if (storedScan) {
+  const scanData = JSON.parse(storedScan);
+  if (scanData.scan_id) {
+    // Restore previous scan findings
+    renderResults({
+      scan_id: scanData.scan_id,
+      target_url: scanData.target_url || '',
+      name: scanName || scanData.scan_id,
+      findings: scanData.findings,
+      mode: scanData.mode || 'summary',
+      result: scanData,
+      elapsedMs: 0,
+      handoff: null,
+    });
+  }
+}
+
+$('devScopedCheck').addEventListener('change', updateDevScopedState);
+loadDevScopedSettings();

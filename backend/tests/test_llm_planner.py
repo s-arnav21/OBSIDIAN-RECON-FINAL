@@ -171,7 +171,9 @@ class LLMPlannerParsingTests(unittest.TestCase):
         self.tools = AgentToolRegistry().planner_catalog()
 
     def plan(self, content):
-        return LLMPlanner(FakeCompletionClient([content])).propose_action(
+        return LLMPlanner(
+            FakeCompletionClient([content, content])
+        ).propose_action(
             self.state.to_dict(),
             self.tools,
         )
@@ -242,6 +244,28 @@ class LLMPlannerParsingTests(unittest.TestCase):
 
     def test_explicit_completion_maps_to_none(self):
         self.assertIsNone(self.plan(COMPLETE_CONTENT))
+
+    def test_fenced_json_is_accepted(self):
+        fenced = f"```json\n{_action_content()}\n```"
+        planned = self.plan(fenced)
+        self.assertEqual(planned.tool_id, "validate-exposed-resource")
+        self.assertEqual(planned.finding_id, FINDING_ID)
+
+    def test_one_retry_recovers_from_malformed_first_response(self):
+        client = FakeCompletionClient(["not json", _action_content()])
+        planned = LLMPlanner(client).propose_action(
+            self.state.to_dict(),
+            self.tools,
+        )
+        self.assertEqual(planned.tool_id, "validate-exposed-resource")
+        self.assertEqual(len(client.calls), 2)
+
+    def test_retry_is_bounded_to_one_attempt(self):
+        client = FakeCompletionClient(["not json", "still not json", _action_content()])
+        with self.assertRaises(LLMPlanningError) as raised:
+            LLMPlanner(client).propose_action(self.state.to_dict(), self.tools)
+        self.assertEqual(raised.exception.category, "invalid_json")
+        self.assertEqual(len(client.calls), 2)
 
     def test_invalid_json_fails_closed(self):
         with self.assertRaises(LLMPlanningError) as raised:

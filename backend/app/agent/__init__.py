@@ -9,7 +9,7 @@ from app.agent.llm_client import (
 from app.agent.llm_planner import LLMPlanner, LLMPlanningError
 from app.agent.models import AgentAction, AgentObservation, AgentState, AgentStatus
 from app.agent.orchestrator import AgentOrchestrator, Planner
-from app.agent.policy import AgentPolicyGate, PolicyDecision, PolicyDecisionCode
+from app.agent.policy import PolicyDecision, PolicyDecisionCode
 from app.agent.run_service import AgentRunResult, AgentRunService, AgentRunStep
 from app.agent.tools import AgentToolDefinition, AgentToolRegistry
 
@@ -18,7 +18,6 @@ __all__ = [
     "AgentExecution",
     "AgentObservation",
     "AgentOrchestrator",
-    "AgentPolicyGate",
     "AgentRunResult",
     "AgentRunService",
     "AgentRunStep",

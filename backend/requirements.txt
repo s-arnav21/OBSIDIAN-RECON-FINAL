@@ -55,3 +55,6 @@ PyMySQL>=1.1.0
 pysmb>=1.2.9.1
 python-whois>=0.9.0
 pytest>=8.0
+# Optional: drives an existing msfrpcd for the metasploit-* tools via
+# app/automation/metasploit_rpc.py (falls back to msfconsole when absent).
+pymetasploit3>=1.0.6

@@ -222,7 +222,7 @@ def _persist(*, session, scan_id: str, asset_id: str, host: str,
             scan_id=scan_id,
             target_url=target_url,
             authorized=authorized,
-            status="completed",
+            status="running",
         )
         try:
             repo.persist_asset(
@@ -235,10 +235,15 @@ def _persist(*, session, scan_id: str, asset_id: str, host: str,
             logger.debug("asset persist conflict", exc_info=True)
 
         stored = skipped = 0
-        for finding in findings:
+        for index, finding in enumerate(findings):
             if finding.asset_id:
                 finding.asset_id = asset_id
             finding.scan_id = scan_id
+            # normalize_all derives finding ids from a hash of the *target url*,
+            # so every re-scan of the same target collides on the findings
+            # primary key and gets silently skipped. Re-key against this scan so
+            # each scan owns its own finding ids.
+            finding.finding_id = f"F{scan_id}-{index:04d}"
             if session.get(FindingORM, finding.finding_id) is not None:
                 skipped += 1
                 continue
@@ -251,10 +256,17 @@ def _persist(*, session, scan_id: str, asset_id: str, host: str,
                 logger.debug("finding persist failed", exc_info=True)
                 session.rollback()
                 break
+        repo.update_scan_status(scan_id, "completed")
         session.commit()
         logger.info("persisted scan %s: %d findings stored, %d skipped",
                     scan_id, stored, skipped)
-        return {"status": "ok", "scan_id": scan_id, "findings_stored": stored,
+        if stored == 0 and skipped:
+            logger.warning(
+                "scan %s stored no findings; all %d were skipped as duplicates",
+                scan_id, skipped,
+            )
+        return {"status": "ok" if stored else ("empty" if skipped else "ok"),
+                "scan_id": scan_id, "findings_stored": stored,
                 "findings_skipped": skipped}
     except Exception:
         logger.exception("full-scan persistence failed")

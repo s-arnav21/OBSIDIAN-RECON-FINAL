@@ -107,14 +107,29 @@ PROFILES = {
         nmap_full_port=False,
         wordlist_profile="default",
     ),
+    "full": ScanProfile(
+        name="full",
+        display_name="Full Scan (all skills + all scanners)",
+        description="Run every skill and scanner with no restrictions. "
+        "Exploit skills, all probes, full nmap scan, everything enabled. "
+        "No automatic skipping based on network availability.",
+        allow_exploit_skills=True,
+        internet_available=True,
+        dns_available=True,
+        root_available=True,
+        nmap_timing="T4",
+        nmap_min_rate=500,
+        nmap_full_port=True,
+        wordlist_profile="default",
+    ),
 }
 
 
 def get_profile(name: Optional[str]) -> ScanProfile:
     if not name:
-        return PROFILES["webapp"]
-    return PROFILES.get(name.lower().strip(), PROFILES["webapp"])
+        return PROFILES["full"]
+    return PROFILES.get(name.lower().strip(), PROFILES["full"])
 
 
 def profile_names() -> list[str]:
-    return ["webapp", "vm", "ctf", "stealth"]
+    return ["webapp", "vm", "ctf", "stealth", "full"]

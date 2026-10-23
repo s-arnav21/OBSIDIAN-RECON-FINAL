@@ -22,6 +22,29 @@ DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024
 ABSOLUTE_MAX_RESPONSE_BYTES = 256 * 1024
 
 
+def _chat_endpoint(base_url: str) -> str:
+    """Resolve the chat-completions path for the configured provider.
+
+    Obsidian supports two provider shapes through the same
+    ``AGENT_LLM_BASE_URL`` setting:
+
+    * **OpenAI-compatible** gateways (vLLM, LiteLLM, Gemini's OpenAI shim)
+      publish the API under ``/v1`` and expect ``/v1/chat/completions``.
+    * **Ollama's native API** (the default local provider, e.g.
+      ``http://host:11434``) expects ``/api/chat``.
+
+    A base URL that already ends in a concrete chat path is honoured as-is;
+    a base ending in ``/v1`` selects the OpenAI shape, anything else uses
+    Ollama's native shape.
+    """
+    base = base_url.rstrip("/")
+    if base.endswith("/chat/completions") or base.endswith("/api/chat"):
+        return base
+    if base.endswith("/v1"):
+        return f"{base}/chat/completions"
+    return f"{base}/api/chat"
+
+
 class LLMClientError(RuntimeError):
     """A bounded provider failure that never includes provider response data."""
 
@@ -152,14 +175,23 @@ class OpenAICompatibleClient:
         *,
         response_format: Dict[str, Any],
     ) -> str:
+        endpoint = _chat_endpoint(self.config.base_url)
+        # Ollama's native /api/chat constrains generation with `format`, not
+        # OpenAI's `response_format`. Sending the OpenAI field to Ollama is
+        # silently ignored, so the model may answer with prose or a fenced
+        # block that the strict planner parser must then reject.
+        native_ollama = endpoint.endswith("/api/chat")
         request_body = {
             "model": self.config.model,
             "messages": list(messages),
             "temperature": 0,
             "stream": False,
             "think": False,
-            "response_format": response_format,
         }
+        if native_ollama:
+            request_body["format"] = "json"
+        else:
+            request_body["response_format"] = response_format
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
@@ -173,7 +205,7 @@ class OpenAICompatibleClient:
             ) as client:
                 with client.stream(
                     "POST",
-                    f"{self.config.base_url}/chat/completions",
+                    endpoint,
                     headers=headers,
                     json=request_body,
                 ) as response:
@@ -200,8 +232,13 @@ class OpenAICompatibleClient:
 
         try:
             payload = json.loads(bytes(body).decode("utf-8"))
-            choices = payload["choices"]
-            message = choices[0]["message"]
+            # Handle both OpenAI format (choices) and Ollama format (message directly)
+            if "choices" in payload:
+                message = payload["choices"][0]["message"]
+            elif "message" in payload:
+                message = payload["message"]
+            else:
+                raise LLMClientError("invalid_provider_response")
             content = message.get("content") or message.get("reasoning") or ""
         except (
             UnicodeDecodeError,
