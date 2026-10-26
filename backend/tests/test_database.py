@@ -96,6 +96,15 @@ class PersistenceRepositoryTests(unittest.TestCase):
                 "exploit_sessions",
                 "exploits",
                 "shells",
+                "agent_tasks",
+                "agent_task_steps",
+                "agent_code_versions",
+                "agent_artifacts",
+                "agent_evidence",
+                "agent_reports",
+                "agent_approvals",
+                "agent_target_sessions",
+                "agent_audit_events",
             },
         )
 

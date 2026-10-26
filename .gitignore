@@ -20,3 +20,7 @@ node_modules/
 
 # Runtime/generated scan data
 backend/data/*.json
+
+# Task-agent runtime data
+backend/runtime/*
+!backend/runtime/.gitkeep

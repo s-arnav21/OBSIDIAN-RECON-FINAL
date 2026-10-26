@@ -377,3 +377,282 @@ class ShellORM(Base):
     )
 
     session: Mapped[ExploitSessionORM] = relationship(back_populates="shells")
+
+
+# ---------------------------------------------------------------------------
+# Task-centric agent persistence (additive; the finding-centric tables above
+# remain unchanged for backward compatibility).
+# ---------------------------------------------------------------------------
+
+
+class AgentTaskORM(Base):
+    __tablename__ = "agent_tasks"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    user_goal: Mapped[str] = mapped_column(String, nullable=False)
+    target: Mapped[str] = mapped_column(String(4096), nullable=False)
+    target_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    allowed_hosts: Mapped[Any] = mapped_column(json_document_type(), nullable=False)
+    allowed_ports: Mapped[Any] = mapped_column(json_document_type(), nullable=False)
+    authorized_lab_scope: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    input_files: Mapped[Any] = mapped_column(json_document_type(), nullable=False)
+    expected_outputs: Mapped[Any] = mapped_column(json_document_type(), nullable=False)
+    permitted_actions: Mapped[Any] = mapped_column(json_document_type(), nullable=False)
+    maximum_steps: Mapped[int] = mapped_column(Integer, nullable=False)
+    maximum_runtime: Mapped[int] = mapped_column(Integer, nullable=False)
+    maximum_repair_attempts: Mapped[int] = mapped_column(Integer, nullable=False)
+    network_policy: Mapped[str] = mapped_column(String(32), nullable=False)
+    approval_required: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    current_status: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    current_step: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    stop_reason: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
+    model_name: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    scope_json: Mapped[Any] = mapped_column(
+        json_document_type(), nullable=False, default=dict
+    )
+    report_json_path: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
+    report_md_path: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+    steps: Mapped[List["AgentTaskStepORM"]] = relationship(
+        back_populates="task", cascade="all, delete-orphan"
+    )
+    code_versions: Mapped[List["AgentCodeVersionORM"]] = relationship(
+        back_populates="task", cascade="all, delete-orphan"
+    )
+    artifacts: Mapped[List["AgentArtifactORM"]] = relationship(
+        back_populates="task", cascade="all, delete-orphan"
+    )
+    evidence: Mapped[List["AgentEvidenceORM"]] = relationship(
+        back_populates="task", cascade="all, delete-orphan"
+    )
+    reports: Mapped[List["AgentReportORM"]] = relationship(
+        back_populates="task", cascade="all, delete-orphan"
+    )
+    approvals: Mapped[List["AgentApprovalORM"]] = relationship(
+        back_populates="task", cascade="all, delete-orphan"
+    )
+    target_sessions: Mapped[List["AgentTargetSessionORM"]] = relationship(
+        back_populates="task", cascade="all, delete-orphan"
+    )
+
+
+class AgentTaskStepORM(Base):
+    __tablename__ = "agent_task_steps"
+    __table_args__ = (
+        UniqueConstraint(
+            "task_id", "step_number", name="uq_agent_task_steps_task_order"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    step_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    decision: Mapped[str] = mapped_column(String(64), nullable=False)
+    action_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    reason: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
+    arguments: Mapped[Any] = mapped_column(
+        json_document_type(), nullable=False, default=dict
+    )
+    target: Mapped[Optional[str]] = mapped_column(String(4096), nullable=True)
+    expected_result: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
+    risk_level: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    requires_approval: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    policy_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    policy_reason: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
+    observation: Mapped[Any] = mapped_column(
+        json_document_type(), nullable=False, default=dict
+    )
+    verification: Mapped[Any] = mapped_column(
+        json_document_type(), nullable=False, default=dict
+    )
+    retrieved_skills: Mapped[Any] = mapped_column(
+        json_document_type(), nullable=False, default=list
+    )
+    model_name: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    request_id: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    response_id: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    task: Mapped[AgentTaskORM] = relationship(back_populates="steps")
+
+
+class AgentCodeVersionORM(Base):
+    __tablename__ = "agent_code_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "task_id", "version", name="uq_agent_code_versions_task_version"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    step_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("agent_task_steps.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    code: Mapped[str] = mapped_column(String, nullable=False)
+    code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(64), nullable=False)
+    error: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
+    explanation: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+    task: Mapped[AgentTaskORM] = relationship(back_populates="code_versions")
+
+
+class AgentArtifactORM(Base):
+    __tablename__ = "agent_artifacts"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    step_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("agent_task_steps.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    path: Mapped[str] = mapped_column(String(2048), nullable=False)
+    sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    size_bytes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    metadata_json: Mapped[Any] = mapped_column(
+        "metadata", json_document_type(), nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+    task: Mapped[AgentTaskORM] = relationship(back_populates="artifacts")
+
+
+class AgentEvidenceORM(Base):
+    __tablename__ = "agent_evidence"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    step_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("agent_task_steps.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    evidence_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    summary: Mapped[str] = mapped_column(String(2048), nullable=False)
+    payload: Mapped[Any] = mapped_column(
+        json_document_type(), nullable=False, default=dict
+    )
+    artifact_path: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+    task: Mapped[AgentTaskORM] = relationship(back_populates="evidence")
+
+
+class AgentReportORM(Base):
+    __tablename__ = "agent_reports"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    report_json: Mapped[Any] = mapped_column(
+        json_document_type(), nullable=False, default=dict
+    )
+    report_md: Mapped[str] = mapped_column(String, nullable=False)
+    json_path: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
+    md_path: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+    task: Mapped[AgentTaskORM] = relationship(back_populates="reports")
+
+
+class AgentApprovalORM(Base):
+    __tablename__ = "agent_approvals"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    step_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("agent_task_steps.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    action_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    reason: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
+    risk_level: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    status: Mapped[str] = mapped_column(String(64), nullable=False, default="pending")
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    decided_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    decided_by: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+
+    task: Mapped[AgentTaskORM] = relationship(back_populates="approvals")
+
+
+class AgentTargetSessionORM(Base):
+    __tablename__ = "agent_target_sessions"
+    __table_args__ = (
+        UniqueConstraint(
+            "task_id", "session_key", name="uq_agent_target_sessions_task_key"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    session_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    host: Mapped[str] = mapped_column(String(255), nullable=False)
+    port: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    username: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    target_host: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(String(64), nullable=False, default="open")
+    metadata_json: Mapped[Any] = mapped_column(
+        "metadata", json_document_type(), nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+    task: Mapped[AgentTaskORM] = relationship(back_populates="target_sessions")
+
+
+class AgentAuditEventORM(Base):
+    __tablename__ = "agent_audit_events"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    task_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("agent_tasks.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    action_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    detail: Mapped[Any] = mapped_column(
+        json_document_type(), nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )

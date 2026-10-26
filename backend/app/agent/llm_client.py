@@ -168,6 +168,7 @@ class OpenAICompatibleClient:
             raise TypeError("config must be an LLMClientConfig")
         self.config = config
         self._transport = transport
+        self.last_response_metadata: Dict[str, Any] = {}
 
     def complete(
         self,
@@ -223,6 +224,17 @@ class OpenAICompatibleClient:
                         ):
                             raise LLMClientError("response_too_large")
                         body.extend(chunk)
+                    self.last_response_metadata = {
+                        "provider_request_id": (
+                            response.headers.get("x-request-id")
+                            or response.headers.get("x-ollama-request-id")
+                            or response.headers.get("request-id")
+                        ),
+                        "http_status": response.status_code,
+                        "provider": (
+                            "ollama" if native_ollama else "openai-compatible"
+                        ),
+                    }
         except LLMClientError:
             raise
         except (httpx.TimeoutException, TimeoutError):
@@ -240,6 +252,18 @@ class OpenAICompatibleClient:
             else:
                 raise LLMClientError("invalid_provider_response")
             content = message.get("content") or message.get("reasoning") or ""
+            metadata = dict(self.last_response_metadata)
+            metadata.update(
+                {
+                    "model": payload.get("model") or self.config.model,
+                    "response_id": payload.get("id"),
+                    "usage": payload.get("usage")
+                    if isinstance(payload.get("usage"), dict)
+                    else {},
+                    "done_reason": payload.get("done_reason"),
+                }
+            )
+            self.last_response_metadata = metadata
         except (
             UnicodeDecodeError,
             json.JSONDecodeError,
